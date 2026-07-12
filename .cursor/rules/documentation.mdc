@@ -1,0 +1,14 @@
+---
+description: Documentation and agent-context conventions for this repo
+alwaysApply: true
+---
+
+# Docs & agent context
+
+- Project map: `docs/README.md`. Domain math: `docs/explanation/math-model.md`.
+- Active feature work lives in `docs/specs/active/<change>/`; archive when done.
+- Decisions that must not be re-litigated: `docs/decisions/`.
+- Keep `.cursor/rules` short; point at docs instead of copying long specs.
+- Prefer tests + types as executable reference once code exists; docs own intent and tradeoffs.
+- UI is not a golden layout — math correctness first.
+- At triggers in `docs/README.md` (phase B2/C, ≥2 active specs, doc drift), self-evaluate full OpenSpec; report upgrade/wait with evidence. Do not wait for the human.

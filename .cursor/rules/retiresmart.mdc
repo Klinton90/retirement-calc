@@ -1,0 +1,26 @@
+---
+description: RetireSmart Canada project conventions, math-model constraints, and privacy rules
+alwaysApply: true
+---
+
+# RetireSmart Canada
+
+Personal Canadian retirement calculator. Client-side only. Not financial advice.
+
+Canonical agent entry: root `AGENTS.md`. Domain math: `docs/explanation/math-model.md`. Doc system: `docs/README.md`.
+
+## Architecture
+
+- Types/enums in `src/types/calculator.ts` only. Prefer enums over string unions.
+- `import type` under `verbatimModuleSyntax`.
+- No third-party chart libs; custom SVG only.
+- `localStorage` key `retiresmart_plan_v1` only — no backend.
+
+## Math (summary — details in docs)
+
+- Target backsolve + account buckets + RRIF rules; see `docs/explanation/math-model.md`.
+- Do not treat all wealth as taxable RRSP; do not invent tax rules absent from that doc / ADRs.
+
+## Testing
+
+- Logic changes: tests in `src/test/`. Skip full runs for pure styling tweaks.

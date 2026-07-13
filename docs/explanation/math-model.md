@@ -1,8 +1,10 @@
 # Math model (living)
 
-Status: research-complete; evolving source of truth for domain behavior  
+Status: **implemented in code** (Phases A–D); living source of truth for domain behavior  
 Audience: implementers + agents  
 Not financial advice.
+
+Implemented modules: `accountBuckets`, `contributionPolicy`, `rrifCalc`, `oasClawback`, `retirementIncomeTax`, `targetEngine`, `calculatePersonPensionForAge`. Cards use `calculatePlanTargets` (two-step conversion). UI not fully redesigned (Phase E light).
 
 Supersedes chat archaeology and deprecated `GEMINI.md`. Settled tradeoffs also recorded under `docs/decisions/`.
 
@@ -15,8 +17,8 @@ Periodic (6–12 month) **review tool**, not a life crystal ball.
 Primary outputs (**cards / target numbers**):
 - Required nest egg at retirement (today’s $ and/or nominal — both labeled)
 - Minimum required contribution today ($/mo) — **option C**
-- Suggested contribution allocation (TFSA / matched RRSP / discretionary RRSP / non-reg)
-- RRSP→RRIF conversion **recommendation** (with runners-up)
+- Suggested contribution allocation (TFSA / matched RRSP / discretionary RRSP / non-reg) — **EsppAllocationGuide** panel
+- RRSP→RRIF conversion **recommendation** (with runners-up) — **ConversionGuidePanel** table (top grid ranks)
 - Regime label: under / near / above target
 
 Secondary: year-by-year projection charts (viewer / stress). **UI is not sacred** — tables/graphs/cards may be redesigned.
@@ -36,7 +38,7 @@ Life events (child, job change) trigger a re-run of the same target engine with 
 | Inflation | 2% |
 | Portfolio return | 5% nominal (~2.9% real) |
 | Post-retirement horizon | **20 years** (~to age 85) |
-| TFSA new room | $7,000 / person / year |
+| TFSA new room | **$7,000 / person / year flat nominal** (CRA sets ad hoc; not CPI-indexed). Optional CPI inflate toggle for sensitivity only. |
 | RRSP room | 18% earned income to annual dollar max + carry-forward |
 | He RRSP | 3% employee + 3% employer match |
 | She RRSP | 2% employee + 2% employer match |
@@ -109,6 +111,18 @@ ESPP cash follows this policy. Spousal RRSP stays as optimizer.
 | Under | Maximize years funded / min shortfall |
 | Near | Meet 10k; then min tax + OAS clawback |
 | Above | 10k floor; optimize tax / OAS / terminal |
+
+### 3.7 Deplete-to-~$0 chart (Min Savings panel)
+
+Draw a **green dashed** reference against the solid portfolio line:
+
+| State | Solid line | Green dashed |
+|---|---|---|
+| **Funded** (Above / Near) | Nest egg at **target** spend | Same nest egg spent *harder* (surplus) until ~$0 at horizon |
+| **Below target** (need extra $/mo) | **Current** path at target spend (runs out early) | **Required** nest egg at the *same* target spend → ~$0 |
+| **Under** (even required nest egg fails) | Best-effort path | Max *affordable* spend that still → ~$0 |
+
+Below-target comparison is the important case: both curves use the **same target spend**; they differ by starting wealth (current vs solved).
 
 ---
 

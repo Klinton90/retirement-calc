@@ -256,10 +256,12 @@ export const SummaryCards: React.FC<SummaryCardsProps> = ({
             </div>
           </div>
 
-          {/* 5. Required Nest Egg Card */}
+          {/* 5. Nest Egg Card — "required" only when below target; else projected on current path */}
           <div className="card" style={{ padding: '20px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
             <div className="flex-between" style={{ marginBottom: '12px' }}>
-              <span style={{ fontSize: '12px', color: 'var(--text-secondary)', fontWeight: 600 }}>REQUIRED NEST EGG</span>
+              <span style={{ fontSize: '12px', color: 'var(--text-secondary)', fontWeight: 600 }}>
+                {minSavingsIsFunded ? 'NEST EGG AT RETIREMENT' : 'REQUIRED NEST EGG'}
+              </span>
               <Landmark size={18} style={{ color: 'var(--primary)' }} />
             </div>
             <div>
@@ -267,7 +269,9 @@ export const SummaryCards: React.FC<SummaryCardsProps> = ({
                 {formatCurrency(minSavingsNestEgg)}
               </h2>
               <p style={{ fontSize: '12px', color: 'var(--text-muted)', margin: '4px 0 0 0' }}>
-                Required balance at Age {retirementAgeHe}
+                {minSavingsIsFunded
+                  ? `Projected balance at Age ${retirementAgeHe}`
+                  : `Min balance at Age ${retirementAgeHe}`}
               </p>
               <p style={{ fontSize: '12px', color: 'var(--text-muted)', margin: '2px 0 0 0' }}>
                 Nominal value · inflated at {pct(inflationRate)}/yr

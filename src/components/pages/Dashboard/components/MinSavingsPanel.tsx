@@ -411,13 +411,15 @@ export const MinSavingsPanel: React.FC<MinSavingsPanelProps> = ({
               border: '1px solid rgba(99,102,241,0.3)',
             }}>
               <div style={{ fontSize: '12px', color: 'var(--text-secondary)', fontWeight: 600, textTransform: 'uppercase', marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '5px' }}>
-                <Target size={11} /> Required Nest Egg at Retirement
+                <Target size={11} /> {isFunded ? 'Nest Egg at Retirement' : 'Required Nest Egg at Retirement'}
               </div>
               <div style={{ fontSize: '22px', fontWeight: 800, letterSpacing: '-0.8px', color: 'var(--primary)' }}>
                 {fmt(fmtNest)}
               </div>
               <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '2px' }}>
-                Nominal · ~{postYears}y horizon · regime {result.regime}
+                {isFunded
+                  ? `Projected on current path · ~${postYears}y · regime ${result.regime}`
+                  : `Min balance to fund target · ~${postYears}y · regime ${result.regime}`}
                 {result.recommendedConversion && (
                   <> · convert He@{result.recommendedConversion.conversionAgeHe}/She@{result.recommendedConversion.conversionAgeShe}</>
                 )}

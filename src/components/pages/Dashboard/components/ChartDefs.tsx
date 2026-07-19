@@ -22,6 +22,11 @@ export const ChartDefs: React.FC = () => {
         <stop offset="0%" stopColor="var(--danger)" stopOpacity="0.12" />
         <stop offset="100%" stopColor="var(--danger)" stopOpacity="0.0" />
       </linearGradient>
+      {/* Fill under negative unallocatedCash (cash shortfall after savings) */}
+      <linearGradient id="cashGapGrad" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stopColor="var(--warning)" stopOpacity="0.0" />
+        <stop offset="100%" stopColor="var(--warning)" stopOpacity="0.22" />
+      </linearGradient>
     </defs>
   );
 };

@@ -9,6 +9,26 @@ export const DEFAULT_PENSION_CONFIG: PensionConfig = {
   oasMinResidencyYears: 10,       // Minimum years of residency in Canada to receive OAS
 };
 
+/**
+ * CPP survivor's pension rate for a survivor already receiving their own CPP
+ * (age 65+): 60% of the deceased contributor's retirement pension. The combined
+ * amount (own + survivor) is capped at the maximum single CPP retirement pension.
+ * OAS has no survivor benefit — the deceased's OAS stops entirely.
+ */
+export const CPP_SURVIVOR_RATE = 0.60;
+
+/**
+ * Combined CPP the survivor receives after a spouse dies: own CPP plus a
+ * survivor's pension (60% of the deceased's CPP), capped at the max single CPP.
+ */
+export function survivorCombinedCppAnnual(
+  ownCppAnnual: number,
+  deceasedCppAnnual: number,
+  maxCppAnnual: number
+): number {
+  return Math.min(ownCppAnnual + CPP_SURVIVOR_RATE * deceasedCppAnnual, maxCppAnnual);
+}
+
 export interface PersonPensionResult {
   residencyYears: number;
   contributionYears: number;
@@ -29,11 +49,9 @@ export interface HouseholdPensionResult {
 
 /**
  * Calculates the expected retirement pension (CPP and OAS) for an individual.
- * 
- * @param input The person's input configuration
- * @param currentYear The current calendar year (default 2026)
- * @param pensionConfig The pension configuration constants
- * @param taxConfig The tax configuration constants (for YMPE comparison)
+ *
+ * OAS residency uses `startYearInCanada`. CPP contribution years use
+ * `cppStartYear` (falling back to arrival), not before age 18.
  */
 export function calculatePersonPension(
   input: PersonInput,
@@ -57,9 +75,10 @@ export function calculatePersonPension(
   const oasMonthly = pensionConfig.maxOasMonthly * oasMultiplier;
 
   // 2. Calculate Contribution Years for CPP
-  // Contributory years start from startYearInCanada (or age 18, whichever is later) to retirementYear
+  // Contributory years start from cppStartYear (or age 18, whichever is later) to retirementYear
   const age18Year = birthYear + 18;
-  const cppStartYear = Math.max(input.startYearInCanada, age18Year);
+  const cppContribStartYear = input.cppStartYear ?? input.startYearInCanada;
+  const cppStartYear = Math.max(cppContribStartYear, age18Year);
   const contributionYears = Math.max(0, retirementYear - cppStartYear);
 
   // Estimate earnings ratio to YMPE (if earnings are above YMPE, they contribute maximum)

@@ -1,17 +1,17 @@
 import React from 'react';
 import type { ProjectionYear } from '../../../../types/calculator';
+import { analyzeRetirementShortfall } from '../../../../utils/retirementShortfall';
 import {
-  Landmark, CalendarClock, BarChart3, Baby, Wallet, TrendingDown,
+  Landmark, Baby, Wallet, TrendingDown, Percent,
 } from 'lucide-react';
 
 interface MetricStripProps {
   projection: ProjectionYear[];
-  heRetirementAge: number;
-  heCurrentAge: number;
-  sheCurrentAge: number;
-  sheRetirementAge: number;
   effectiveTaxRateHe: number; // 0-1
   effectiveTaxRateShe: number; // 0-1
+  /** Combined Ontario marginal income-tax rate on next taxable $ (0–1). */
+  marginalTaxRateHe: number;
+  marginalTaxRateShe: number;
   totalHouseholdGross: number;
   totalIncomeTaxHe: number;
   totalIncomeTaxShe: number;
@@ -70,44 +70,34 @@ const MiniCard: React.FC<MiniCardProps> = ({ label, value, sub, icon, accentColo
 
 export const MetricStrip: React.FC<MetricStripProps> = ({
   projection,
-  heCurrentAge,
-  heRetirementAge,
-  sheCurrentAge,
-  sheRetirementAge,
   effectiveTaxRateHe,
   effectiveTaxRateShe,
+  marginalTaxRateHe,
+  marginalTaxRateShe,
   totalHouseholdGross,
   totalIncomeTaxHe,
   totalIncomeTaxShe,
 }) => {
-  // 1. Years to retirement
-  const heYears = Math.max(0, heRetirementAge - heCurrentAge);
-  const sheYears = Math.max(0, sheRetirementAge - sheCurrentAge);
-
-  // 2. Peak portfolio
-  const peakRow = projection.reduce((best, r) => r.portfolioEnd > best.portfolioEnd ? r : best, projection[0]);
-
-  // 3. Lifetime CCB
   const totalCcbLifetime = projection.reduce((sum, r) => sum + (r.ccbBenefit || 0), 0);
 
-  // 4. Worst-case cash flow deficit during retirement
-  const retiredRows = projection.filter(r => r.isRetired);
-  const worstRetiredRow = retiredRows.length > 0
-    ? Math.min(...retiredRows.map(r => r.netIncome - r.expenses), 0)
-    : 0;
-  const worstRow = retiredRows.find(r => (r.netIncome - r.expenses) === worstRetiredRow);
-  const monthlyRetirementDeficit = worstRetiredRow / 12;
+  // Shared analysis so this card and the Retirement Readiness card agree on
+  // whether the final horizon year has a shortfall.
+  const shortfall = analyzeRetirementShortfall(projection);
+  const hasShortfall = !shortfall.lastsFullHorizon;
+  const firstShortAge = shortfall.firstShortfallAge;
+  const worstShortAge = shortfall.worstShortfallAge;
+  const monthlyRetirementDeficit = hasShortfall ? -(shortfall.worstAnnualGap / 12) : 0;
 
-  // 5. Total tax paid (current year, annualized)
   const totalTaxCurrentYear = totalIncomeTaxHe + totalIncomeTaxShe;
   const combinedEffectiveTaxRate = totalHouseholdGross > 0 ? totalTaxCurrentYear / totalHouseholdGross : 0;
+  // Headline = higher earner's marginal (next household $ typically hits them).
+  const headlineMarginal = Math.max(marginalTaxRateHe, marginalTaxRateShe);
 
-  // 6. Lifetime investment gains (working phase)
   const totalGains = projection.filter(r => !r.isRetired).reduce((sum, r) => sum + r.investmentGain, 0);
 
-  const retirementColor = heYears <= 5 ? 'var(--success)' : heYears <= 15 ? 'var(--warning)' : 'var(--info)';
   const taxColor = combinedEffectiveTaxRate > 0.30 ? 'var(--danger)' : combinedEffectiveTaxRate > 0.22 ? 'var(--warning)' : 'var(--success)';
-  const surplusColor = monthlyRetirementDeficit >= 0 ? 'var(--success)' : 'var(--danger)';
+  const marginalColor = headlineMarginal > 0.45 ? 'var(--danger)' : headlineMarginal > 0.35 ? 'var(--warning)' : 'var(--success)';
+  const surplusColor = hasShortfall ? 'var(--danger)' : 'var(--success)';
 
   return (
     <div style={{
@@ -125,19 +115,11 @@ export const MetricStrip: React.FC<MetricStripProps> = ({
       />
 
       <MiniCard
-        label="Years to Retirement"
-        value={<span style={{ color: retirementColor }}>{heYears} yrs</span>}
-        sub={`He retires ${heRetirementAge} · She retires ${sheRetirementAge} (${sheYears} yrs)`}
-        icon={<CalendarClock size={15} />}
-        accentColor={retirementColor}
-      />
-
-      <MiniCard
-        label="Peak Portfolio"
-        value={fmt(peakRow.portfolioEnd, true)}
-        sub={`Age ${peakRow.ageHe} (${peakRow.year})`}
-        icon={<BarChart3 size={15} />}
-        accentColor="var(--accent)"
+        label="Marginal Tax Rate"
+        value={<span style={{ color: marginalColor }}>{pct(headlineMarginal)}</span>}
+        sub={`He ${pct(marginalTaxRateHe)} · She ${pct(marginalTaxRateShe)} · next taxable $`}
+        icon={<Percent size={15} />}
+        accentColor={marginalColor}
       />
 
       {totalCcbLifetime > 0 && (
@@ -154,17 +136,15 @@ export const MetricStrip: React.FC<MetricStripProps> = ({
         label="Retirement Monthly Deficit"
         value={
           <span style={{ color: surplusColor }}>
-            {monthlyRetirementDeficit >= 0 
-              ? '$0/mo' 
-              : `${fmt(Math.abs(monthlyRetirementDeficit))}/mo`}
+            {hasShortfall ? `${fmt(Math.abs(monthlyRetirementDeficit))}/mo` : '$0/mo'}
           </span>
         }
         sub={
-          monthlyRetirementDeficit >= 0 
-            ? 'Fully Funded (drawdowns match expenses)' 
-            : worstRow
-            ? `Shortfall starts Age ${retiredRows.find(r => r.portfolioEnd === 0)?.ageHe || worstRow.ageHe} (max Age ${worstRow.ageHe})`
-            : 'Portfolio depleted! Deficit remains'
+          !hasShortfall
+            ? 'Viewer cash path fully funded (same scan as Readiness) — not Extra $/mo to add'
+            : firstShortAge !== null && worstShortAge !== null && worstShortAge !== firstShortAge
+            ? `Worst cash gap Age ${worstShortAge} · starts Age ${firstShortAge} · not Extra to add`
+            : `Worst cash gap at Age ${(firstShortAge ?? worstShortAge)!} · not Extra to add`
         }
         icon={<Wallet size={15} />}
         accentColor={surplusColor}

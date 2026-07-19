@@ -95,6 +95,29 @@ h1, h2, h3, h4, h5, h6 {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
+  align-items: start;
+}
+
+/* Keep side-by-side controls aligned when labels/helpers wrap unevenly. */
+.input-group-row > .input-group {
+  display: grid;
+  grid-template-rows: 2.75em auto minmax(2.4em, auto);
+  gap: 6px;
+  align-content: start;
+}
+
+.input-group-row > .input-group > label {
+  display: flex;
+  align-items: flex-end;
+  min-height: 2.75em;
+  line-height: 1.25;
+  margin: 0;
+}
+
+.input-group-row > .input-group > p {
+  margin: 0;
+  min-height: 2.4em;
+  line-height: 1.25;
 }
 
 label {
@@ -271,9 +294,39 @@ input[type="checkbox"]:checked + .toggle-switch::after {
   gap: 16px;
 }
 
+.excess-room-content {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.8fr) minmax(0, 1.2fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.excess-room-summary-stack {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.excess-room-routing {
+  min-width: 0;
+  padding-left: 20px;
+  border-left: 1px solid var(--border-color);
+}
+
 @media (max-width: 768px) {
   .grid-cols-3 {
     grid-template-columns: 1fr;
+  }
+
+  .excess-room-content {
+    grid-template-columns: 1fr;
+  }
+
+  .excess-room-routing {
+    padding-top: 16px;
+    padding-left: 0;
+    border-top: 1px solid var(--border-color);
+    border-left: 0;
   }
 }
 

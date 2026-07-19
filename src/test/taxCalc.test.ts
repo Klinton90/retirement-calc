@@ -5,6 +5,9 @@ import {
   calculatePersonTax,
   calculateCcb,
   calculateHouseholdTax,
+  marginalIncomeTaxRate,
+  bracketRateAt,
+  DEFAULT_TAX_CONFIG,
 } from '../utils/taxCalc';
 import {
   type PersonInput,
@@ -57,6 +60,7 @@ describe('Tax Calculations', () => {
         age: 36,
         salary: 168000,
         startYearInCanada: 2015,
+        cppStartYear: 2015,
         retirementAge: 65,
         extraIncomeMonthly: 0,
         rrspEmployeeType: ContributionType.PERCENTAGE,
@@ -133,6 +137,7 @@ describe('Tax Calculations', () => {
         age: 36,
         salary: 168000,
         startYearInCanada: 2015,
+        cppStartYear: 2015,
         retirementAge: 65,
         extraIncomeMonthly: 0,
         rrspEmployeeType: ContributionType.PERCENTAGE,
@@ -149,6 +154,7 @@ describe('Tax Calculations', () => {
         age: 38,
         salary: 82000,
         startYearInCanada: 2022,
+        cppStartYear: 2022,
         retirementAge: 65,
         extraIncomeMonthly: 0,
         rrspEmployeeType: ContributionType.FLAT,
@@ -195,6 +201,35 @@ describe('Tax Calculations', () => {
       // Drift = 46200 - 50000 = -3800
       expect(result.savingsDrift).toBeCloseTo(-3800, 0);
       expect(result.actualSavingsRate).toBeCloseTo(46200 / 250000, 4);
+    });
+  });
+
+  describe('marginalIncomeTaxRate', () => {
+    it('matches federal + Ontario bracket rates with no surtax (mid She income)', () => {
+      // ~$78k taxable: fed 20.5%, ON 9.15%, no surtax yet → ~29.65%
+      const taxable = 78000;
+      const fed = bracketRateAt(taxable, DEFAULT_TAX_CONFIG.federalBrackets);
+      const ont = bracketRateAt(taxable, DEFAULT_TAX_CONFIG.ontarioBrackets);
+      expect(fed).toBe(0.205);
+      expect(ont).toBe(0.0915);
+      const m = marginalIncomeTaxRate(taxable, DEFAULT_TAX_CONFIG);
+      expect(m).toBeCloseTo(fed + ont, 3);
+    });
+
+    it('includes Ontario surtax for high earners (He-range taxable)', () => {
+      // ~$140k: fed 26%, ON 11.16%, both surtax tiers → ON × 1.56
+      const taxable = 140000;
+      const fed = bracketRateAt(taxable, DEFAULT_TAX_CONFIG.federalBrackets);
+      const ont = bracketRateAt(taxable, DEFAULT_TAX_CONFIG.ontarioBrackets);
+      expect(fed).toBe(0.26);
+      expect(ont).toBe(0.1116);
+      const expected = fed + ont * 1.56; // 0.26 + 0.1741 = 0.4341
+      const m = marginalIncomeTaxRate(taxable, DEFAULT_TAX_CONFIG);
+      expect(m).toBeCloseTo(expected, 3);
+    });
+
+    it('is near zero at $0 taxable', () => {
+      expect(marginalIncomeTaxRate(0)).toBeLessThan(0.16);
     });
   });
 });

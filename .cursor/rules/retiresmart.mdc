@@ -19,6 +19,9 @@ Canonical agent entry: root `AGENTS.md`. Domain math: `docs/explanation/math-mod
 ## Math (summary — details in docs)
 
 - Target backsolve + account buckets + RRIF rules; see `docs/explanation/math-model.md`.
+- Nest-egg card = cash-aware current-path projection; →$0 band = min need; Extra Gap headline = READINESS (`solveExtraForReadiness`); BACKSOLVE @71 is design-only ([ADR 0004](../../docs/decisions/0004-extra-funding-solve.md)); Excess funded = `isFundedWithoutExtra` (§3.7–3.8). Earliest comfortable retirement = joint years earlier at active-scenario spend, same terminal ([ADR 0007](../../docs/decisions/0007-early-retirement-solve.md)). OAS = arrival year; CPP = work-start year.
+- Extra/ESPP routing is symmetric: own TFSA → spouse TFSA; personal RRSP owner-only; cross-spouse RRSP spousal-only; see ADR 0006. Survivor stress defaults to primary-earner death and is identical in both engines — Plot 1/readiness/deficit must match Extra/→$0 ([ADR 0005](../../docs/decisions/0005-survivor-consistency.md), [ADR 0006](../../docs/decisions/0006-symmetric-earner-roles.md)).
+- Same horizon in both engines via `resolveRetirementHorizon` (`lifeExpectancyDelta` years; default 20); readiness ↔ deficit share `analyzeRetirementShortfall`. Deprecated = `solveRequiredSavings` only — not `runProjection`.
 - Do not treat all wealth as taxable RRSP; do not invent tax rules absent from that doc / ADRs.
 
 ## Testing

@@ -3,6 +3,13 @@ export enum FamilyMember {
   SHE = 'SHE',
 }
 
+/** Which spouse the survivor stress removes. PRIMARY resolves from base salaries. */
+export enum SurvivorWho {
+  PRIMARY = 'PRIMARY',
+  HE = 'HE',
+  SHE = 'SHE',
+}
+
 export enum SavingsBase {
   GROSS = 'GROSS',
   NET = 'NET',
@@ -24,6 +31,7 @@ export enum ContributionType {
 
 export enum AllocationPolicy {
   TFSA_FIRST = 'TFSA_FIRST',
+  /** @deprecated Unused by Extra/ESPP deploy (ownership TFSA + MV). Kept for saved-plan compat. */
   RRSP_FIRST = 'RRSP_FIRST',
 }
 
@@ -31,6 +39,19 @@ export enum FundingRegime {
   UNDER = 'UNDER',
   NEAR = 'NEAR',
   ABOVE = 'ABOVE',
+}
+
+/**
+ * Excess MV probe destinations (ADR 0003).
+ * Used by `marginalValueGuide` / optional `RetirementPlan.mvProbe`.
+ */
+export enum MvDestination {
+  TFSA_HE = 'TFSA_HE',
+  TFSA_SHE = 'TFSA_SHE',
+  RRSP_HE = 'RRSP_HE',
+  RRSP_SHE = 'RRSP_SHE',
+  SPOUSAL = 'SPOUSAL',
+  NON_REG = 'NON_REG',
 }
 
 /** Investable account ledger. ESPP is not a bucket — it is a contribution source. */
@@ -96,8 +117,13 @@ export interface PersonInput {
   name: string;
   age: number;
   salary: number;
+  /** Year arrived in Canada — OAS residency only. */
   startYearInCanada: number;
-  cppStartYear?: number; // year CPP contributions began; falls back to startYearInCanada. OAS residency always uses startYearInCanada.
+  /**
+   * Year started working / CPP contributions began — CPP only.
+   * Engine clamps to not before age 18. OAS never uses this field.
+   */
+  cppStartYear: number;
   retirementAge: number;
   extraIncomeMonthly: number; // monthly side-hustle, rental, or dividend income
   
@@ -110,8 +136,17 @@ export interface PersonInput {
   esppEmployeeRate: number; // percentage
   esppEmployerRate: number; // percentage matching
   
-  // Other savings
+  /**
+   * Extra investable $/mo (today's $). App allocates under soft limits:
+   * TFSA → Spousal (She) → Non-reg. Prefer this over destination-specific fields.
+   */
+  extraContributionMonthly?: number;
+  /**
+   * @deprecated Destination fields — migrated into `extraContributionMonthly`.
+   * Engines may still set these from the Excess allocator for tax/projection wiring.
+   */
   otherSavingsTfsaMonthly: number;
+  /** @deprecated See extraContributionMonthly / Excess allocator. */
   otherSavingsRrspMonthly: number;
 
   // Registered Room Carry-forwards
@@ -170,11 +205,21 @@ export interface RetirementPlan {
   savingsTargetRate: number; // default 0.20 (20%)
   investmentReturnRate: number; // default 0.05 (5%)
   inflationRate: number; // default 0.02 (2%)
+  /**
+   * Annual salary raise rate (working years). Distinct from inflation — wages often lag CPI.
+   * Default 0.01 (1%). Applied to salary, % payroll RRSP/ESPP, and flat $ payroll contributions.
+   */
+  salaryGrowthRate?: number;
   desiredRetirementSpendMonthly: number; // realistic retirement spend (wants)
   mandatoryRetirementSpendMonthly: number; // minimal retirement spend (needs)
   /** @deprecated Prefer accountBuckets; kept for migration / blended display. */
   currentSavings: number;
   accountBuckets?: AccountBuckets;
+  /**
+   * Legacy discretionary order for `deployAnnualContributions` only.
+   * Extra/ESPP nest-egg path ignores this — ownership TFSA + MV (ADR 0003).
+   * UI no longer exposes a toggle; engines default / coerce to TFSA_FIRST.
+   */
   allocationPolicy?: AllocationPolicy;
   /** Age at which each person converts RRSP→RRIF for the contribution backsolve path (default 71). */
   conversionAgeHe?: number;
@@ -183,7 +228,17 @@ export interface RetirementPlan {
   useYoungerSpouseRrifAge?: boolean;
   /** Optional survivor stress (default off). */
   survivorToggle?: boolean;
+  /** Survivor stress deceased spouse. Default PRIMARY (higher base gross salary). */
+  survivorWho?: SurvivorWho;
   survivorYearIndex?: number; // year index into retirement horizon when one spouse dies
+  /**
+   * Fraction of household retirement spend that continues after the survivor event
+   * (one spouse dies). Default 0.70 — a single survivor spends less than the couple.
+   * Applied identically in runProjection and simulateDecumulation. On the income
+   * side the survivor keeps their own CPP + 60% of the deceased's CPP (capped at
+   * max CPP); the deceased's OAS stops. See ADR 0005.
+   */
+  survivorSpendFactor?: number;
   nearRegimeSlackYears?: number; // terminal wealth / annual spend band for NEAR vs ABOVE
   /** Annual new TFSA room per person (nominal CAD). Default 7000. */
   annualTfsaLimit?: number;
@@ -196,13 +251,23 @@ export interface RetirementPlan {
   ccbConfig: CcbConfig;
   childCostConfig: ChildCostConfig;
   parentalLeaveConfig: ParentalLeaveConfig;
+  /** Post-retirement years. Resolve via `resolveRetirementHorizon` — default 20. */
   lifeExpectancyDelta?: number;
   includeExtraIncome?: boolean;
   depositEsppToRrsp?: boolean;
   esppRefundSaveRate?: number;
   spousalRrspMonthly?: number;
   optimizeSpousalRrsp?: boolean;
-  targetTaxAdvantageThreshold?: number;
+  /**
+   * Internal Excess MV probe: each working year deposits `annualToday` (inflated like Extra)
+   * into `destination` for `stream`, without going through the soft-capacity cascade.
+   * Not a user-facing input — used by `marginalValueGuide` / tests.
+   */
+  mvProbe?: {
+    stream: FamilyMember;
+    destination: MvDestination;
+    annualToday: number;
+  };
 }
 
 export interface PersonTaxResult {
@@ -300,4 +365,24 @@ export interface ProjectionYear {
   sheRrspRoomRemaining?: number;
   heTfsaRoomRemaining?: number;
   sheTfsaRoomRemaining?: number;
+  /** End-of-year account balances (bucket split) — lets the card read the projected mix at retirement. */
+  bucketBalances?: {
+    tfsaHe: number;
+    tfsaShe: number;
+    rrspHe: number;
+    rrspShe: number;
+    nonReg: number;
+  };
+  /** Portfolio drawn to cover a working-year cash shortfall after cutting voluntary savings. */
+  shortfallRaided?: number;
+  /**
+   * Free cash minus the FULL intended savings plan (before any cut/raid).
+   * Negative = the plan outstrips cash that year (savings strain). Working years only.
+   */
+  unallocatedCashUncapped?: number;
+  /**
+   * Full intended personal cash contributions before free-cash cuts
+   * (RRSP emp + ESPP emp + Extra + solver + refund redeposit). Working years only.
+   */
+  intendedPersonalCash?: number;
 }

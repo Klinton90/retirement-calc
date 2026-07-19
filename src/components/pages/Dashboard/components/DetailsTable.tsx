@@ -91,11 +91,11 @@ export const DetailsTable: React.FC<DetailsTableProps> = ({ data }) => {
             {' '}(≈ Spend when funded).
           </p>
           <p style={{ fontSize: '11px', color: 'var(--text-muted)', margin: '0 0 12px 0', lineHeight: 1.45, maxWidth: 1100 }}>
-            <strong>Why He/She % is dynamic (not fixed 50/50):</strong> TFSA bridge fills from <em>He first, then She</em>.
-            Extra RRSP (above each person’s RRIF minimum) repeatedly takes from whoever has the <em>larger remaining RRSP</em>.
+            <strong>Why He/She % is dynamic (not fixed 50/50):</strong> TFSA bridge draws the <em>larger remaining TFSA</em> first
+            (secondary-earner tie-break). Extra RRSP (above each person’s RRIF minimum) repeatedly takes from whoever has the <em>larger remaining RRSP</em>.
             The % shown is that year’s outcome of those rules + starting balances — not a configured split.
             {' '}
-            <strong>ESPP / discretionary cash:</strong> not lifestyle spend — under TFSA-first it fills TFSA room, then RRSP room, then <em>non-reg</em> (see “Where savings went”).
+            <strong>ESPP / Extra:</strong> not lifestyle spend — each person fills own TFSA then spouse TFSA, then own RRSP / Spousal / <em>non-reg</em> by MV (see “Where savings went”).
           </p>
           <div className="details-table-scroll">
             <table
@@ -174,13 +174,13 @@ export const DetailsTable: React.FC<DetailsTableProps> = ({ data }) => {
                   <th style={{ padding: '10px', borderRight: '1px solid var(--border-color)' }}>Shortfall</th>
 
                   <th style={{ padding: '10px' }}>
-                    → TFSA <Tooltip text="Working: $ of this year’s savings (incl. ESPP sale cash under TFSA-first) deposited to TFSA." alignLeft />
+                    → TFSA <Tooltip text="Working: Extra/ESPP into TFSA this year (own TFSA first, then spouse TFSA)." alignLeft />
                   </th>
                   <th style={{ padding: '10px' }}>
-                    → RRSP <Tooltip text="Working: payroll RRSP + employer match + discretionary RRSP (after TFSA is full under TFSA-first)." alignLeft />
+                    → RRSP <Tooltip text="Working: payroll RRSP + employer match + discretionary RRSP after TFSA (preferred spouse by soft capacity / income)." alignLeft />
                   </th>
                   <th style={{ padding: '10px', borderRight: '1px solid var(--border-color)' }}>
-                    → Non-reg <Tooltip text="Working: overflow after TFSA+RRSP room are full. Still invested (taxable account) — not lifestyle spend. ESPP often lands here once TFSAs are maxed." alignLeft />
+                    → Non-reg <Tooltip text="Working: overflow after TFSA + soft RRSP capacity. Still invested — not lifestyle. Common once both TFSAs are full." alignLeft />
                   </th>
 
                   <th style={{ padding: '10px' }}>He RRSP rm</th>

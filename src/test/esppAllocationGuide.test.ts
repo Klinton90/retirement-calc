@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { explainEsppAllocation } from '../utils/esppAllocationGuide';
-import { AllocationPolicy, ContributionType, SavingsBase, type RetirementPlan } from '../types/calculator';
+import { explainExcessMoney } from '../utils/excessMoneyGuide';
+import { AllocationPolicy, ContributionType, FamilyMember, SavingsBase, type RetirementPlan } from '../types/calculator';
 import { DEFAULT_TAX_CONFIG, DEFAULT_CCB_CONFIG } from '../utils/taxCalc';
 import { DEFAULT_ACCOUNT_BUCKETS, totalInvestable } from '../utils/accountBuckets';
 import { calculatePlanTargets } from '../utils/targetEngine';
@@ -76,18 +77,21 @@ function basePlan(over: Partial<RetirementPlan> = {}): RetirementPlan {
 }
 
 describe('esppAllocationGuide', () => {
-  it('splits ESPP sale cash TFSA-first before RRSP when room exists', () => {
+  it('locked cascade: He TFSA → She TFSA → preferred RRSP when room exists', () => {
     const g = explainEsppAllocation(basePlan());
     expect(g.esppCashAnnual).toBeCloseTo(168000 * 0.115, 0);
-    expect(g.underTfsaFirst.toTfsa).toBeGreaterThan(0);
-    expect(g.underTfsaFirst.toTfsa + g.underTfsaFirst.toRrsp + g.underTfsaFirst.toNonReg).toBeCloseTo(
-      g.esppCashAnnual,
-      0
-    );
-    expect(g.suggestedPolicy).toBe(AllocationPolicy.TFSA_FIRST);
+    expect(g.lockedCascade.toTfsaHe).toBeGreaterThan(0);
+    expect(g.lockedCascade.toTfsaShe).toBeGreaterThan(0);
+    expect(
+      g.lockedCascade.toTfsaHe +
+        g.lockedCascade.toTfsaShe +
+        g.lockedCascade.toRrspHe +
+        g.lockedCascade.toRrspShe +
+        g.lockedCascade.toNonReg
+    ).toBeCloseTo(g.esppCashAnnual, 0);
   });
 
-  it('with zero TFSA room, ESPP sale goes to RRSP then non-reg under either policy', () => {
+  it('with zero TFSA room, ESPP sale goes to preferred RRSP then non-reg', () => {
     const g = explainEsppAllocation(
       basePlan({
         heInput: {
@@ -100,10 +104,74 @@ describe('esppAllocationGuide', () => {
         },
       })
     );
-    expect(g.underTfsaFirst.toTfsa).toBe(0);
-    expect(g.underRrspFirst.toTfsa).toBe(0);
-    expect(g.underTfsaFirst.toRrsp).toBeGreaterThan(0);
-    expect(g.underRrspFirst.toRrsp).toBe(g.underTfsaFirst.toRrsp);
+    expect(g.lockedCascade.toTfsa).toBe(0);
+    expect(g.lockedCascade.toRrspHe + g.lockedCascade.toRrspShe).toBeGreaterThan(0);
+    expect(
+      g.lockedCascade.toRrspHe + g.lockedCascade.toRrspShe + g.lockedCascade.toNonReg
+    ).toBeCloseTo(g.esppCashAnnual, 0);
+  });
+
+  it('when She earns more, locked cascade prefers She RRSP after TFSA', () => {
+    const g = explainEsppAllocation(
+      basePlan({
+        heInput: {
+          ...basePlan().heInput,
+          salary: 70000,
+          carryForwardTfsaRoom: 0,
+          carryForwardRrspRoom: 50_000,
+        },
+        sheInput: {
+          ...basePlan().sheInput,
+          salary: 200000,
+          carryForwardTfsaRoom: 0,
+          carryForwardRrspRoom: 50_000,
+        },
+        accountBuckets: { ...DEFAULT_ACCOUNT_BUCKETS, rrspHe: 50_000, rrspShe: 20_000 },
+      })
+    );
+    expect(g.preferredRrsp).toBe(FamilyMember.SHE);
+    expect(g.lockedCascade.toRrspShe).toBeGreaterThan(0);
+    expect(g.lockedCascade.toRrspShe).toBeGreaterThanOrEqual(g.lockedCascade.toRrspHe);
+  });
+
+  it('She Extra fills own TFSA then spills into He TFSA', () => {
+    const openingHe = 12000;
+    const openingShe = 24000;
+    const sheExtraMo = 3000; // 36k/yr
+    const g = explainEsppAllocation(
+      basePlan({
+        heInput: {
+          ...basePlan().heInput,
+          carryForwardTfsaRoom: openingHe,
+          extraContributionMonthly: 0,
+        },
+        sheInput: {
+          ...basePlan().sheInput,
+          carryForwardTfsaRoom: openingShe,
+          extraContributionMonthly: sheExtraMo,
+        },
+      })
+    );
+    expect(g.extraAteTfsa).toBe(openingShe + openingHe);
+    expect(g.roomsAfterExtra.tfsaHe).toBe(0);
+    expect(g.roomsAfterExtra.tfsaShe).toBe(0);
+    expect(g.lockedCascade.toTfsaHe).toBe(0);
+  });
+
+  it('She Extra $36k uses both spouses TFSA rooms symmetrically', () => {
+    const g = explainExcessMoney(
+      basePlan({
+        heInput: { ...basePlan().heInput, carryForwardTfsaRoom: 12000, extraContributionMonthly: 0 },
+        sheInput: { ...basePlan().sheInput, carryForwardTfsaRoom: 24000, extraContributionMonthly: 3000 },
+      }),
+      { currentYear: 2026 }
+    );
+    expect(g.sheSplit.toTfsaShe).toBe(24000);
+    expect(g.sheSplit.toTfsaHe).toBe(12000);
+    expect(g.sheSplit.toTfsa).toBe(36000);
+    expect(g.sheSplit.toTfsa + g.sheSplit.toRrspOwn + g.sheSplit.toSpousal + g.sheSplit.toNonReg).toBe(
+      36000
+    );
   });
 });
 

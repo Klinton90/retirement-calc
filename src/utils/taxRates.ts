@@ -77,6 +77,7 @@ export const INITIAL_HE: PersonInput = {
   rrspEmployerRate: 3,
   esppEmployeeRate: 10,
   esppEmployerRate: 1.5,
+  extraContributionMonthly: 0,
   otherSavingsTfsaMonthly: 0,
   otherSavingsRrspMonthly: 0,
   carryForwardRrspRoom: 144050,
@@ -96,6 +97,7 @@ export const INITIAL_SHE: PersonInput = {
   rrspEmployerRate: 2,
   esppEmployeeRate: 0,
   esppEmployerRate: 0,
+  extraContributionMonthly: 0,
   otherSavingsTfsaMonthly: 0,
   otherSavingsRrspMonthly: 0,
   carryForwardRrspRoom: 46117,
@@ -183,3 +185,82 @@ export function calculateOntarioHealthPremium(taxableIncome: number): number {
   
   return 900;
 }
+
+/** Ontario surtax kicks in on basic provincial tax above these thresholds (2026). */
+const ONTARIO_SURTAX_THRESHOLD_1 = 6823;
+const ONTARIO_SURTAX_THRESHOLD_2 = 8731;
+
+/** Marginal rate of the bracket that contains `income` (0 if income ≤ 0). */
+export function bracketRateAt(income: number, brackets: TaxBracket[]): number {
+  if (income <= 0 || brackets.length === 0) return 0;
+  for (const bracket of brackets) {
+    if (income <= bracket.threshold) return bracket.rate;
+  }
+  return brackets[brackets.length - 1]!.rate;
+}
+
+/**
+ * Federal + Ontario income tax (incl. surtax) + Ontario Health Premium on a
+ * given taxable income. Non-refundable credits use BPA (with federal clawback)
+ * plus optional fixed CPP/EI credit bases (pass the person's current amounts so
+ * the level matches payroll; they do not change with the next taxable dollar).
+ */
+export function calculateIncomeTaxFromTaxable(
+  taxableIncome: number,
+  taxConfig: TaxConfig = DEFAULT_TAX_CONFIG,
+  creditBases: { cppBaseForCredit?: number; eiPremium?: number } = {}
+): number {
+  const taxable = Math.max(0, taxableIncome);
+  const cppBase = creditBases.cppBaseForCredit ?? 0;
+  const ei = creditBases.eiPremium ?? 0;
+
+  const federalTaxBeforeCredits = calculateBracketTax(taxable, taxConfig.federalBrackets);
+  const provincialTaxBeforeCredits = calculateBracketTax(taxable, taxConfig.ontarioBrackets);
+
+  let federalBpa = taxConfig.federalBpaMax;
+  if (taxable > taxConfig.federalBpaThreshold1) {
+    const bpaClawbackRate =
+      (taxConfig.federalBpaMax - taxConfig.federalBpaMin) /
+      (taxConfig.federalBpaThreshold2 - taxConfig.federalBpaThreshold1);
+    federalBpa = Math.max(
+      taxConfig.federalBpaMin,
+      taxConfig.federalBpaMax - (taxable - taxConfig.federalBpaThreshold1) * bpaClawbackRate
+    );
+  }
+
+  const federalCredits = (federalBpa + cppBase + ei) * 0.15;
+  const provincialCredits = (taxConfig.ontarioBpa + cppBase + ei) * 0.0505;
+
+  const federalTaxPayable = Math.max(0, federalTaxBeforeCredits - federalCredits);
+  let provincialTaxBasic = Math.max(0, provincialTaxBeforeCredits - provincialCredits);
+
+  let ontarioSurtax = 0;
+  if (provincialTaxBasic > ONTARIO_SURTAX_THRESHOLD_1) {
+    ontarioSurtax += (provincialTaxBasic - ONTARIO_SURTAX_THRESHOLD_1) * 0.36;
+  }
+  if (provincialTaxBasic > ONTARIO_SURTAX_THRESHOLD_2) {
+    ontarioSurtax += (provincialTaxBasic - ONTARIO_SURTAX_THRESHOLD_2) * 0.20;
+  }
+
+  const ontarioHealthPremium = calculateOntarioHealthPremium(taxable);
+  return federalTaxPayable + provincialTaxBasic + ontarioSurtax + ontarioHealthPremium;
+}
+
+/**
+ * Combined Ontario marginal income-tax rate on the next dollar of taxable income
+ * (federal + Ontario brackets + surtax + BPA clawback + OHP ramps).
+ * Excludes CPP/EI payroll — same tax base as the Effective Tax Rate card.
+ */
+export function marginalIncomeTaxRate(
+  taxableIncome: number,
+  taxConfig: TaxConfig = DEFAULT_TAX_CONFIG,
+  creditBases: { cppBaseForCredit?: number; eiPremium?: number } = {},
+  delta: number = 100
+): number {
+  if (taxableIncome < 0) return 0;
+  const d = Math.max(1, delta);
+  const t0 = calculateIncomeTaxFromTaxable(taxableIncome, taxConfig, creditBases);
+  const t1 = calculateIncomeTaxFromTaxable(taxableIncome + d, taxConfig, creditBases);
+  return (t1 - t0) / d;
+}
+

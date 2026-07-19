@@ -1,11 +1,19 @@
 import { describe, it, expect } from 'vitest';
-import { runProjection, solveRequiredSavings, calculateMinimumNestEgg, calculateMinSavingsRequired } from '../utils/retirementCalc';
+import {
+  runProjection,
+  solveRequiredSavings,
+  calculateMinimumNestEgg,
+  calculateMinSavingsRequired,
+  bucketsAtRetirementFromProjection,
+} from '../utils/retirementCalc';
+import { calculatePlanTargets } from '../utils/targetEngine';
 import {
   type RetirementPlan,
   ContributionType,
   SavingsBase,
   FactorType,
   AllocationPolicy,
+  SurvivorWho,
 } from '../types/calculator';
 import { DEFAULT_TAX_CONFIG, DEFAULT_CCB_CONFIG } from '../utils/taxCalc';
 
@@ -16,6 +24,7 @@ describe('Retirement Projections', () => {
       age: 36,
       salary: 168000,
       startYearInCanada: 2015,
+      cppStartYear: 2015,
       retirementAge: 65,
       extraIncomeMonthly: 0,
       rrspEmployeeType: ContributionType.PERCENTAGE,
@@ -31,6 +40,7 @@ describe('Retirement Projections', () => {
       age: 38,
       salary: 82000,
       startYearInCanada: 2022,
+      cppStartYear: 2022,
       retirementAge: 65,
       extraIncomeMonthly: 0,
       rrspEmployeeType: ContributionType.FLAT,
@@ -73,12 +83,18 @@ describe('Retirement Projections', () => {
     },
   };
 
-  it('should run a projection for 59 years (until He is 95)', () => {
+  it('should run a projection for the full horizon (retirement = lifeExpectancyDelta years)', () => {
     const results = runProjection(defaultPlan, 2026);
-    
-    // He starts at 36, goes to 95. Number of years: 95 - 36 + 1 = 60 years.
-    expect(results).toHaveLength(60);
-    
+
+    // defaultPlan omits lifeExpectancyDelta → DEFAULT_LIFE_EXPECTANCY_DELTA (20).
+    // Ages 36..84 inclusive = 49 rows; retirement years = 20 (65..84). Terminal
+    // label age is 85 (not modeled). Must match simulateDecumulation via
+    // resolveRetirementHorizon — no phantom extra final year.
+    expect(results).toHaveLength(49);
+    expect(results[results.length - 1].ageHe).toBe(84);
+    const retiredYears = results.filter(r => r.isRetired).length;
+    expect(retiredYears).toBe(20);
+
     // First year should start at 2026
     expect(results[0].year).toBe(2026);
     expect(results[0].ageHe).toBe(36);
@@ -117,12 +133,40 @@ describe('Retirement Projections', () => {
     const year2027 = results[1];
 
     // Check She gross income in 2026: salary 82000
-    // Check She gross income in 2027: salary 82000 * 1.02 (inflation) * 0.7 (top-up target) = 58548
+    // Check She gross income in 2027: salary 82000 * 1.01 (salary growth) * 0.7 (top-up target) = 57974
     // Let's verify He salary is normal in 2026: 168000
     expect(year2026.grossIncome).toBeCloseTo(168000 + 82000, -2);
     
-    // In 2027, He gross is 168000 * 1.02 * 10/12 = 142800. She is 82000 * 1.02 * 0.7 = 58548. Total = 201348
-    expect(year2027.grossIncome).toBeCloseTo(142800 + 58548, -2);
+    // In 2027, He gross is 168000 * 1.01 * 10/12 = 141400. She is 82000 * 1.01 * 0.7 = 57974. Total = 199374
+    expect(year2027.grossIncome).toBeCloseTo(141400 + 57974, -2);
+  });
+
+  it('grows salary at salaryGrowthRate, not inflationRate', () => {
+    const plan: RetirementPlan = {
+      ...defaultPlan,
+      expenses: [],
+      inflationRate: 0.05,
+      salaryGrowthRate: 0.01,
+      depositEsppToRrsp: false,
+      heInput: {
+        ...defaultPlan.heInput,
+        esppEmployeeRate: 0,
+        esppEmployerRate: 0,
+        rrspEmployeeValue: 0,
+        rrspEmployerRate: 0,
+      },
+      sheInput: {
+        ...defaultPlan.sheInput,
+        rrspEmployeeValue: 0,
+        rrspEmployerRate: 0,
+        otherSavingsRrspMonthly: 0,
+      },
+    };
+    const years = runProjection(plan, 2026);
+    const startGross = 168000 + 82000;
+    expect(years[0].grossIncome).toBeCloseTo(startGross, 0);
+    expect(years[1].grossIncome).toBeCloseTo(startGross * 1.01, 0);
+    expect(years[1].grossIncome).toBeLessThan(startGross * 1.04);
   });
 
   it('should apply black swan portfolio drop', () => {
@@ -185,7 +229,7 @@ describe('Retirement Projections', () => {
     expect(results[2].childCosts).toBeCloseTo(12000 * Math.pow(1.02, 2), 1);
   });
 
-  it('should drag down portfolio wealth when there is a negative surplus', () => {
+  it('cuts voluntary savings then raids portfolio for residual cash shortfall', () => {
     const planWithDeficit: RetirementPlan = {
       ...defaultPlan,
       expenses: [
@@ -198,11 +242,11 @@ describe('Retirement Projections', () => {
 
     const year2026 = results[0];
     expect(year2026.unallocatedCash).toBeLessThan(0);
-    
-    const netContribution = year2026.actualSavings + year2026.unallocatedCash;
-    // Grow opening balance first, then apply net cash flow (no return on this year's contrib/deficit timing)
-    const expectedPortfolioEnd = 100000 * 1.05 + netContribution;
-    expect(year2026.portfolioEnd).toBeCloseTo(expectedPortfolioEnd, 1);
+    // Free cash negative → personal contribs cut to 0, residual shortfall raided.
+    expect(year2026.shortfallRaided).toBeGreaterThan(0);
+    expect(year2026.actualSavings).toBe(0);
+    // Grown opening minus raid (no personal contribs land).
+    expect(year2026.portfolioEnd).toBeLessThan(100000 * 1.05);
     expect(year2026.investmentGain).toBeCloseTo(100000 * 0.05, 1);
   });
 
@@ -225,9 +269,12 @@ describe('Retirement Projections', () => {
     const y0 = runProjection(plan, 2026)[0];
     expect(y0.portfolioStart).toBeCloseTo(200000, 0);
     expect(y0.investmentGain).toBeCloseTo(200000 * 0.05, 0);
-    // End = grown opening + net contributions (gain must not include 5% on the ~34k save)
+    // End = grown opening + invested contributions − any shortfall raid
     expect(y0.portfolioEnd).toBeCloseTo(
-      y0.portfolioStart + y0.investmentGain + y0.actualSavings + Math.min(0, y0.unallocatedCash),
+      y0.portfolioStart +
+        y0.investmentGain +
+        y0.actualSavings -
+        (y0.shortfallRaided ?? 0),
       0
     );
     expect(y0.investmentGain).toBeLessThan(y0.actualSavings); // sanity: gain ≠ ~5% of contrib-heavy pile
@@ -263,6 +310,93 @@ describe('Retirement Projections', () => {
     const resultsWithMoreSavings = runProjection(planToSolve, 2026, false, solved.additionalSavingsMonthly);
     const lastYear = resultsWithMoreSavings[resultsWithMoreSavings.length - 1];
     expect(lastYear.portfolioEnd).toBeGreaterThanOrEqual(0);
+  });
+
+  it('nest egg at retirement tracks cash-aware plan targets (same projection path)', () => {
+    const plan: RetirementPlan = {
+      ...defaultPlan,
+      heInput: {
+        ...defaultPlan.heInput,
+        extraContributionMonthly: 500,
+        carryForwardTfsaRoom: 20000,
+        carryForwardRrspRoom: 10000,
+      },
+      sheInput: {
+        ...defaultPlan.sheInput,
+        otherSavingsRrspMonthly: 0,
+        extraContributionMonthly: 400,
+        carryForwardTfsaRoom: 15000,
+        carryForwardRrspRoom: 5000,
+      },
+      accountBuckets: {
+        tfsaHe: 50000,
+        tfsaShe: 40000,
+        rrspHe: 80000,
+        rrspShe: 30000,
+        nonReg: 0,
+        cashExcluded: 0,
+      },
+      currentSavings: 200000,
+      annualTfsaLimit: 7000,
+      lifeExpectancyDelta: 20,
+      depositEsppToRrsp: false,
+    };
+    const targets = calculatePlanTargets(plan, 2026, false, {
+      accumulate: (p, m, y) => bucketsAtRetirementFromProjection(p, m, y, false),
+    });
+    const withConv: RetirementPlan = {
+      ...plan,
+      conversionAgeHe: targets.recommendedConversion.conversionAgeHe,
+      conversionAgeShe: targets.recommendedConversion.conversionAgeShe,
+    };
+    const proj = runProjection(withConv, 2026, false);
+    const retireRow = proj.find(r => r.ageHe === plan.heInput.retirementAge);
+    expect(retireRow).toBeDefined();
+    // Opening wealth at retirement year should match target-engine current-path nest egg.
+    expect(retireRow!.portfolioStart).toBeCloseTo(targets.projectedNestEggAtRetirement, -3);
+  });
+
+  it('child costs + leave lower projected nest egg vs child-free path', () => {
+    const noChild = { ...defaultPlan, children: [] as RetirementPlan['children'] };
+    const withChild: RetirementPlan = {
+      ...defaultPlan,
+      childCostConfig: {
+        age0To4Mandatory: 800,
+        age0To4Realistic: 2000,
+        age5To11Mandatory: 400,
+        age5To11Realistic: 1000,
+        age12To17Mandatory: 400,
+        age12To17Realistic: 1000,
+        age18To21Mandatory: 200,
+        age18To21Realistic: 500,
+      },
+      children: [
+        {
+          id: 'c1',
+          age: -1,
+          birthAgeHe: defaultPlan.heInput.age + 1,
+          sheLeaveMonths: 12,
+          heLeaveMonths: 2,
+        },
+      ],
+    };
+    const nestNo = calculatePlanTargets(noChild, 2026, false, {
+      accumulate: (p, m, y) => bucketsAtRetirementFromProjection(p, m, y, false),
+    }).projectedNestEggAtRetirement;
+    const nestYes = calculatePlanTargets(withChild, 2026, false, {
+      accumulate: (p, m, y) => bucketsAtRetirementFromProjection(p, m, y, false),
+    }).projectedNestEggAtRetirement;
+    expect(nestYes).toBeLessThan(nestNo);
+
+    const leaveWith = runProjection(withChild, 2026, false).find(
+      r => r.ageHe === defaultPlan.heInput.age + 1
+    )!;
+    const leaveNo = runProjection(noChild, 2026, false).find(
+      r => r.ageHe === defaultPlan.heInput.age + 1
+    )!;
+    expect(leaveWith.childCosts).toBeGreaterThan(0);
+    // Leave + daycare reduce what can actually be invested that year
+    expect(leaveWith.actualSavings).toBeLessThan(leaveNo.actualSavings);
   });
 
   it('should calculate tax savings and apply reinvested refund when depositing ESPP to RRSP', () => {
@@ -322,8 +456,11 @@ describe('Retirement Projections', () => {
 
     const result = calculateMinSavingsRequired(planToSolve, 2026, false);
     expect(result.monthlySavingsNeeded).toBeGreaterThan(0);
-    expect(result.nestEgg).toBeGreaterThan(0);
-    expect(result.portfolioCurve[0]).toBeCloseTo(result.nestEgg, -1);
+    // nestEgg field = projected on current path (may be ~0 with no payroll/Extra);
+    // solved path is exposed as solvedNestEggAtRetirement when UI needs funding solve.
+    const solved = (result as { solvedNestEggAtRetirement?: number }).solvedNestEggAtRetirement ?? 0;
+    expect(solved).toBeGreaterThan(0);
+    expect(result.portfolioCurve[0]).toBeCloseTo(solved, -1);
     expect(result.portfolioCurve[result.portfolioCurve.length - 1]).toBeGreaterThanOrEqual(0);
   });
 
@@ -400,6 +537,114 @@ describe('Retirement Projections', () => {
     if ((r.heRrspDraw ?? 0) + (r.sheRrspDraw ?? 0) > 0) {
       expect(r.heRrspDrawShare).toBeGreaterThanOrEqual(0);
       expect(r.heRrspDrawShare).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it('applies survivor stress to Plot 1 pensions, splitting, and portfolio path', () => {
+    const base: RetirementPlan = {
+      ...defaultPlan,
+      desiredRetirementSpendMonthly: 10000,
+      lifeExpectancyDelta: 4,
+      survivorYearIndex: 1,
+      heInput: { ...defaultPlan.heInput, age: 65, retirementAge: 65 },
+      sheInput: { ...defaultPlan.sheInput, age: 65, retirementAge: 65 },
+      accountBuckets: {
+        tfsaHe: 400000,
+        tfsaShe: 200000,
+        rrspHe: 800000,
+        rrspShe: 300000,
+        nonReg: 0,
+        cashExcluded: 0,
+      },
+      currentSavings: 1700000,
+    };
+
+    const bothAlive = runProjection({ ...base, survivorToggle: false }, 2026);
+    const survivor = runProjection({ ...base, survivorToggle: true }, 2026);
+    const halfSpend = runProjection(
+      { ...base, survivorToggle: true, survivorSpendFactor: 0.5 },
+      2026
+    );
+    const sheDeceased = runProjection(
+      {
+        ...base,
+        survivorToggle: true,
+        survivorWho: SurvivorWho.SHE,
+      },
+      2026
+    );
+    const aliveAt65 = bothAlive.find(r => r.ageHe === 65)!;
+    const stressedAt65 = survivor.find(r => r.ageHe === 65)!;
+    const aliveAt66 = bothAlive.find(r => r.ageHe === 66)!;
+    const stressedAt66 = survivor.find(r => r.ageHe === 66)!;
+    const halfAt66 = halfSpend.find(r => r.ageHe === 66)!;
+    const sheDeceasedAt66 = sheDeceased.find(
+      r => r.ageHe === 66
+    )!;
+
+    // Stress starts at retirement index 1, so the retirement-year row is unchanged.
+    expect(stressedAt65.pensionIncome).toBeCloseTo(aliveAt65.pensionIncome, 2);
+    expect(stressedAt65.expenses).toBeCloseTo(aliveAt65.expenses, 2);
+
+    // Match targetEngine's crude survivor model: He's OAS + own CPP stop, She's remains.
+    expect(stressedAt66.hePensionGross).toBe(0);
+    expect(stressedAt66.shePensionGross).toBeGreaterThan(0);
+    expect(aliveAt66.hePensionGross).toBeGreaterThan(0);
+
+    // CPP survivor benefit: She's pension after He dies exceeds her own-alone
+    // pension (she gains 60% of his CPP, capped), but stays below the couple's total.
+    const sheOwnAlive = aliveAt66.shePensionGross!;
+    expect(stressedAt66.shePensionGross).toBeGreaterThan(sheOwnAlive);
+    expect(stressedAt66.shePensionGross).toBeLessThan(
+      aliveAt66.hePensionGross! + aliveAt66.shePensionGross!
+    );
+
+    // Post-death the survivor spends the default 70% of the couple's target.
+    expect(stressedAt66.expenses).toBeCloseTo(aliveAt66.expenses * 0.70, 0);
+    // Factor is configurable.
+    expect(halfAt66.expenses).toBeCloseTo(aliveAt66.expenses * 0.5, 0);
+    expect(sheDeceasedAt66.shePensionGross).toBe(0);
+    expect(sheDeceasedAt66.hePensionGross).toBeGreaterThanOrEqual(
+      aliveAt66.hePensionGross!
+    );
+  });
+
+  it('underfunded retirement years max-drain — portfolio does not rebound after shortfall', () => {
+    // Small nest egg + high spend so the portfolio runs out mid-horizon.
+    const plan: RetirementPlan = {
+      ...defaultPlan,
+      desiredRetirementSpendMonthly: 12000,
+      lifeExpectancyDelta: 20,
+      investmentReturnRate: 0.05,
+      inflationRate: 0.02,
+      heInput: { ...defaultPlan.heInput, age: 65, retirementAge: 65 },
+      sheInput: { ...defaultPlan.sheInput, age: 65, retirementAge: 65 },
+      accountBuckets: {
+        tfsaHe: 50000,
+        tfsaShe: 50000,
+        rrspHe: 200000,
+        rrspShe: 100000,
+        nonReg: 0,
+        cashExcluded: 0,
+      },
+      currentSavings: 400000,
+    };
+    const retired = runProjection(plan, 2026).filter(r => r.isRetired);
+    expect(retired.length).toBeGreaterThan(5);
+
+    const firstShort = retired.findIndex(r => r.netIncome + 1 < r.expenses);
+    expect(firstShort).toBeGreaterThanOrEqual(0);
+
+    const shortYear = retired[firstShort];
+    // Must still produce real cash (not the old bug of netIncome = 0 / RRIF-mins only).
+    expect(shortYear.netIncome).toBeGreaterThan(shortYear.pensionIncome * 0.5);
+    expect(shortYear.portfolioDrawTotal ?? 0).toBeGreaterThan(0);
+    // Residual after the underfunded draw should be tiny vs opening balance.
+    expect(shortYear.portfolioEnd).toBeLessThan(shortYear.portfolioStart * 0.35);
+
+    // Once shortfall begins, Plot 1 opening balances must not climb again.
+    for (let i = firstShort + 1; i < retired.length; i++) {
+      expect(retired[i].portfolioStart).toBeLessThanOrEqual(retired[i - 1].portfolioStart + 1);
     }
   });
 });

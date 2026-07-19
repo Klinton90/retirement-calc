@@ -3,6 +3,8 @@ import {
   calculatePersonPension,
   calculateHouseholdPension,
   calculatePersonPensionForAge,
+  survivorCombinedCppAnnual,
+  CPP_SURVIVOR_RATE,
 } from '../utils/pensionCalc';
 import { type PersonInput, ContributionType } from '../types/calculator';
 
@@ -12,6 +14,7 @@ describe('Pension Calculations', () => {
     age: 36,
     salary: 168000,
     startYearInCanada: 2015,
+    cppStartYear: 2015,
     retirementAge: 65,
     extraIncomeMonthly: 0,
     rrspEmployeeType: ContributionType.PERCENTAGE,
@@ -28,6 +31,7 @@ describe('Pension Calculations', () => {
     age: 38,
     salary: 82000,
     startYearInCanada: 2022,
+    cppStartYear: 2022,
     retirementAge: 65,
     extraIncomeMonthly: 0,
     rrspEmployeeType: ContributionType.PERCENTAGE,
@@ -143,6 +147,25 @@ describe('Pension Calculations', () => {
     });
   });
 
+  describe('calculatePersonPension cppStartYear', () => {
+    it('honors cppStartYear for CPP while OAS stays on arrival year', () => {
+      const withCppStart = { ...heInput, cppStartYear: 2020 };
+      const result = calculatePersonPension(withCppStart, 2026);
+      expect(result.contributionYears).toBe(35); // 2055 - 2020
+      expect(result.cppMultiplier).toBeCloseTo(35 / 39, 4);
+      expect(result.residencyYears).toBe(40);
+      expect(result.oasMonthly).toBeCloseTo(743.05, 2);
+    });
+
+    it('changing only work start does not change OAS', () => {
+      const base = calculatePersonPension(heInput, 2026);
+      const laterWork = calculatePersonPension({ ...heInput, cppStartYear: 2020 }, 2026);
+      expect(laterWork.oasMonthly).toBe(base.oasMonthly);
+      expect(laterWork.oasMultiplier).toBe(base.oasMultiplier);
+      expect(laterWork.cppMonthly).toBeLessThan(base.cppMonthly);
+    });
+  });
+
   describe('calculateHouseholdPension', () => {
     it('should calculate household pension sum correctly', () => {
       const result = calculateHouseholdPension(heInput, sheInput, 2026);
@@ -150,6 +173,24 @@ describe('Pension Calculations', () => {
       const sheP = calculatePersonPension(sheInput, 2026);
       
       expect(result.totalHouseholdPensionAnnual).toBe(heP.totalPensionAnnual + sheP.totalPensionAnnual);
+    });
+  });
+
+  describe('survivorCombinedCppAnnual', () => {
+    it('adds 60% of the deceased CPP to the survivor own CPP', () => {
+      expect(survivorCombinedCppAnnual(10000, 20000, 100000)).toBeCloseTo(
+        10000 + CPP_SURVIVOR_RATE * 20000,
+        6
+      );
+    });
+
+    it('caps the combined amount at the max single CPP', () => {
+      // 15000 + 0.6*18000 = 25800, capped at 20000
+      expect(survivorCombinedCppAnnual(15000, 18000, 20000)).toBe(20000);
+    });
+
+    it('is at least the survivor own CPP', () => {
+      expect(survivorCombinedCppAnnual(12000, 0, 20000)).toBe(12000);
     });
   });
 });

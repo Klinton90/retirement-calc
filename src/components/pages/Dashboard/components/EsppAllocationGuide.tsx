@@ -1,11 +1,10 @@
 import React from 'react';
 import { PiggyBank } from 'lucide-react';
-import { AllocationPolicy, type RetirementPlan } from '../../../../types/calculator';
+import { type RetirementPlan } from '../../../../types/calculator';
 import { explainEsppAllocation } from '../../../../utils/esppAllocationGuide';
 
 interface EsppAllocationGuideProps {
   plan: RetirementPlan;
-  onAllocationPolicy?: (policy: AllocationPolicy) => void;
 }
 
 const fmt = (val: number) =>
@@ -24,26 +23,18 @@ const pctBar = (part: number, total: number, color: string) => {
   );
 };
 
-export const EsppAllocationGuide: React.FC<EsppAllocationGuideProps> = ({
-  plan,
-  onAllocationPolicy,
-}) => {
+/** Standalone ESPP guide (optional). ExcessRoomPanel embeds a similar cascade view. */
+export const EsppAllocationGuide: React.FC<EsppAllocationGuideProps> = ({ plan }) => {
   const g = explainEsppAllocation(plan);
   const totalForBars = Math.max(g.esppCashAnnual, 1);
+  const c = g.lockedCascade;
 
-  const rows: { label: string; policy: AllocationPolicy; split: typeof g.underTfsaFirst; suggested: boolean }[] = [
-    {
-      label: 'TFSA first',
-      policy: AllocationPolicy.TFSA_FIRST,
-      split: g.underTfsaFirst,
-      suggested: g.suggestedPolicy === AllocationPolicy.TFSA_FIRST,
-    },
-    {
-      label: 'RRSP first',
-      policy: AllocationPolicy.RRSP_FIRST,
-      split: g.underRrspFirst,
-      suggested: g.suggestedPolicy === AllocationPolicy.RRSP_FIRST,
-    },
+  const bars = [
+    { label: 'He TFSA', val: c.toTfsaHe, color: '#34d399' },
+    { label: 'She TFSA', val: c.toTfsaShe, color: '#6ee7b7' },
+    { label: 'He RRSP', val: c.toRrspHe, color: '#818cf8' },
+    { label: 'She RRSP', val: c.toRrspShe, color: '#a78bfa' },
+    { label: 'Non-reg', val: c.toNonReg, color: '#f59e0b' },
   ];
 
   return (
@@ -56,7 +47,7 @@ export const EsppAllocationGuide: React.FC<EsppAllocationGuideProps> = ({
               ESPP redeploy guidance
             </h3>
             <p style={{ margin: '2px 0 0 0', fontSize: '12px', color: 'var(--text-muted)' }}>
-              ESPP is cash after sale — not its own account. Match + payroll RRSP stay in RRSP; sale proceeds follow allocation policy.
+              After Extra: He TFSA → She TFSA → preferred RRSP → Non-reg. Nest-egg Extra uses MV (ADR 0003).
             </p>
           </div>
         </div>
@@ -69,76 +60,29 @@ export const EsppAllocationGuide: React.FC<EsppAllocationGuideProps> = ({
         {g.summary}
       </p>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '12px' }}>
-        {rows.map(row => {
-          const active = g.activePolicy === row.policy;
-          return (
-            <div
-              key={row.policy}
-              style={{
-                padding: '12px 14px',
-                borderRadius: 10,
-                border: active ? '1px solid rgba(16,185,129,0.45)' : '1px solid var(--border-color)',
-                background: row.suggested ? 'rgba(16,185,129,0.06)' : 'rgba(255,255,255,0.02)',
-              }}
-            >
-              <div className="flex-between" style={{ marginBottom: 8 }}>
-                <span style={{ fontSize: '12px', fontWeight: 700, textTransform: 'uppercase' }}>
-                  {row.label}
-                  {row.suggested ? ' · suggest' : ''}
-                  {active ? ' · active' : ''}
-                </span>
-                {onAllocationPolicy && !active && (
-                  <button
-                    type="button"
-                    onClick={() => onAllocationPolicy(row.policy)}
-                    style={{
-                      fontSize: '11px',
-                      padding: '3px 8px',
-                      borderRadius: 4,
-                      border: '1px solid var(--border-color)',
-                      background: 'transparent',
-                      color: 'var(--text-secondary)',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    Use
-                  </button>
-                )}
-              </div>
-
-              {[
-                { label: 'TFSA', val: row.split.toTfsa, color: '#34d399' },
-                { label: 'RRSP (discretionary)', val: row.split.toRrsp, color: '#818cf8' },
-                { label: 'Non-reg', val: row.split.toNonReg, color: '#f59e0b' },
-              ].map(b => (
-                <div key={b.label} style={{ marginBottom: 6 }}>
-                  <div className="flex-between" style={{ fontSize: '11px', marginBottom: 2 }}>
-                    <span style={{ color: 'var(--text-muted)' }}>{b.label}</span>
-                    <span style={{ fontWeight: 600 }}>{fmt(b.val)}</span>
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    {pctBar(b.val, totalForBars, b.color)}
-                  </div>
-                </div>
-              ))}
+      <div
+        style={{
+          padding: '12px 14px',
+          borderRadius: 10,
+          border: '1px solid rgba(16,185,129,0.45)',
+          background: 'rgba(16,185,129,0.06)',
+          maxWidth: 420,
+        }}
+      >
+        <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', marginBottom: 8 }}>
+          ESPP cascade · this year (after Extra)
+        </div>
+        {bars.map(b => (
+          <div key={b.label} style={{ marginBottom: 6 }}>
+            <div className="flex-between" style={{ fontSize: 11, marginBottom: 2 }}>
+              <span style={{ color: 'var(--text-muted)' }}>{b.label}</span>
+              <span style={{ fontWeight: 600 }}>{fmt(b.val)}</span>
             </div>
-          );
-        })}
-      </div>
-
-      <div style={{
-        marginTop: 12,
-        display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
-        gap: 8,
-        fontSize: '11px',
-        color: 'var(--text-muted)',
-      }}>
-        <div>TFSA room (He/She): {fmt(g.rooms.tfsaHe)} / {fmt(g.rooms.tfsaShe)}</div>
-        <div>RRSP room (He/She): {fmt(g.rooms.rrspHe)} / {fmt(g.rooms.rrspShe)}</div>
-        <div>Payroll+match RRSP (fixed): {fmt(g.payrollRrspHe + g.payrollRrspShe + g.employerMatchHe + g.employerMatchShe)}</div>
-        <div>ESPP→RRSP tax toggle: {g.depositEsppToRrsp ? 'ON' : 'OFF'}</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              {pctBar(b.val, totalForBars, b.color)}
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );

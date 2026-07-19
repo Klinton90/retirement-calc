@@ -14,7 +14,8 @@
 - [x] D Contribution policy (ESPP redeploy; match first; TFSA then discretionary)
 - [x] D Keep spousal RRSP optimizer (UI demoted to Advanced accordion in InputSection)
 - [x] Docs: update math-model status; validation notes; archive pending user confirm
+- [x] Archived 2026-07-14 → `docs/specs/archive/2026-07-14-math-model-vnext/`
 
 ## OpenSpec gate (end of B2/C)
 
-**Verdict: wait** — still one primary change stream; archive/merge discipline not failing yet. Re-check if ≥2 active specs appear or archive is skipped repeatedly.
+**Verdict: wait** (2026-07-12) — one primary change stream. Re-checked 2026-07-14 on archive: still wait for full OpenSpec; successor change is `excess-mv-ranking` alone.

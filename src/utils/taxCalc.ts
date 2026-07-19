@@ -6,6 +6,7 @@ import {
   type HouseholdTaxResult,
   SavingsBase,
   ContributionType,
+  FamilyMember,
   type ChildInput,
 } from '../types/calculator';
 import {
@@ -13,6 +14,9 @@ import {
   DEFAULT_CCB_CONFIG,
   calculateBracketTax,
   calculateOntarioHealthPremium,
+  bracketRateAt,
+  calculateIncomeTaxFromTaxable,
+  marginalIncomeTaxRate,
 } from './taxRates';
 import { calculateCcb } from './ccbCalc';
 
@@ -22,6 +26,9 @@ export {
   calculateBracketTax,
   calculateOntarioHealthPremium,
   calculateCcb,
+  bracketRateAt,
+  calculateIncomeTaxFromTaxable,
+  marginalIncomeTaxRate,
 };
 
 export function calculatePersonTax(
@@ -188,7 +195,9 @@ export function calculateHouseholdTax(
   ccbConfig: CcbConfig = DEFAULT_CCB_CONFIG,
   depositEsppToRrsp: boolean = false,
   spousalRrspMonthly: number = 0,
-  heCarryForwardRrspRoom: number = 0
+  heCarryForwardRrspRoom: number = 0,
+  sheCarryForwardRrspRoom: number = 0,
+  spousalContributor: FamilyMember = FamilyMember.HE
 ): HouseholdTaxResult {
   let heResult = calculatePersonTax(heInput, taxConfig, depositEsppToRrsp);
   let sheResult = calculatePersonTax(sheInput, taxConfig, depositEsppToRrsp);
@@ -197,18 +206,62 @@ export function calculateHouseholdTax(
 
   if (spousalRrspMonthly > 0) {
     const maxRrspLimit = 33720;
-    const heRrspRoom = Math.min(maxRrspLimit, heInput.salary * 0.18) + heCarryForwardRrspRoom;
-    const heOwnRrspDeductions = heResult.totalRrspDeduction ?? 0;
-    const heRemainingRoom = Math.max(0, heRrspRoom - heOwnRrspDeductions);
+    const contributorInput =
+      spousalContributor === FamilyMember.HE ? heInput : sheInput;
+    const contributorResult =
+      spousalContributor === FamilyMember.HE ? heResult : sheResult;
+    const carryForward =
+      spousalContributor === FamilyMember.HE
+        ? heCarryForwardRrspRoom
+        : sheCarryForwardRrspRoom;
+    const contributorRoom =
+      Math.min(maxRrspLimit, contributorInput.salary * 0.18) + carryForward;
+    const remainingRoom = Math.max(
+      0,
+      contributorRoom - (contributorResult.totalRrspDeduction ?? 0)
+    );
     
-    const spousalContributionAnnual = Math.min(spousalRrspMonthly * 12, heRemainingRoom);
+    const spousalContributionAnnual = Math.min(
+      spousalRrspMonthly * 12,
+      remainingRoom
+    );
     optimizedSpousalMonthly = spousalContributionAnnual / 12;
-    
-    const sheOwnRrspOverride = Math.max(0, sheInput.otherSavingsRrspMonthly - optimizedSpousalMonthly);
-    
-    // Re-run with optimized spousal split
-    heResult = calculatePersonTax(heInput, taxConfig, depositEsppToRrsp, (heInput.otherSavingsRrspMonthly || 0) + optimizedSpousalMonthly);
-    sheResult = calculatePersonTax(sheInput, taxConfig, depositEsppToRrsp, sheOwnRrspOverride);
+
+    if (spousalContributor === FamilyMember.HE) {
+      const sheOwnRrspOverride = Math.max(
+        0,
+        sheInput.otherSavingsRrspMonthly - optimizedSpousalMonthly
+      );
+      heResult = calculatePersonTax(
+        heInput,
+        taxConfig,
+        depositEsppToRrsp,
+        (heInput.otherSavingsRrspMonthly || 0) + optimizedSpousalMonthly
+      );
+      sheResult = calculatePersonTax(
+        sheInput,
+        taxConfig,
+        depositEsppToRrsp,
+        sheOwnRrspOverride
+      );
+    } else {
+      const heOwnRrspOverride = Math.max(
+        0,
+        heInput.otherSavingsRrspMonthly - optimizedSpousalMonthly
+      );
+      sheResult = calculatePersonTax(
+        sheInput,
+        taxConfig,
+        depositEsppToRrsp,
+        (sheInput.otherSavingsRrspMonthly || 0) + optimizedSpousalMonthly
+      );
+      heResult = calculatePersonTax(
+        heInput,
+        taxConfig,
+        depositEsppToRrsp,
+        heOwnRrspOverride
+      );
+    }
   }
 
   const afni = heResult.taxableIncome + sheResult.taxableIncome;

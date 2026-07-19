@@ -45,12 +45,26 @@ export const HeInputs: React.FC<HeInputsProps> = ({ heInput, updatePerson, inclu
         helperText={!includeExtraIncome ? 'Disabled (Excluded in selector)' : ''}
       />
 
-      <FormInput
-        label="Year Arrived in Canada"
-        type="number"
-        value={heInput.startYearInCanada}
-        onChange={val => updatePerson('he', 'startYearInCanada', val)}
-      />
+      <div className="input-group-row">
+        <FormInput
+          label="Arrived in Canada"
+          type="number"
+          value={heInput.startYearInCanada}
+          onChange={val => updatePerson('he', 'startYearInCanada', val)}
+          helperText="OAS residency"
+        />
+        <FormInput
+          label="Started working (CPP)"
+          type="number"
+          value={heInput.cppStartYear}
+          onChange={val => updatePerson('he', 'cppStartYear', val)}
+          helperText={
+            heInput.cppStartYear < heInput.startYearInCanada
+              ? 'Before arrival — unusual for CPP'
+              : 'CPP start (not before age 18)'
+          }
+        />
+      </div>
 
       {/* RRSP */}
       <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '12px', marginTop: '12px' }}>
@@ -112,29 +126,22 @@ export const HeInputs: React.FC<HeInputsProps> = ({ heInput, updatePerson, inclu
         </div>
       </div>
 
-      {/* Other savings */}
+      {/* Extra contribution — app allocates destination under soft limits */}
       <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '12px', marginTop: '12px' }}>
         <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: '8px' }}>
-          OTHER SAVINGS
+          EXTRA CONTRIBUTION
         </span>
         <div className="input-group-row">
           <FormInput
-            label="Other Savings to TFSA ($/mo)"
+            label="Extra investable ($/mo)"
             type="number"
             prefix="$"
-            value={heInput.otherSavingsTfsaMonthly}
-            onChange={val => updatePerson('he', 'otherSavingsTfsaMonthly', val)}
-          />
-          <FormInput
-            label="Other Savings to RRSP ($/mo)"
-            type="number"
-            prefix="$"
-            value={heInput.otherSavingsRrspMonthly}
-            onChange={val => updatePerson('he', 'otherSavingsRrspMonthly', val)}
+            value={heInput.extraContributionMonthly ?? ((heInput.otherSavingsTfsaMonthly || 0) + (heInput.otherSavingsRrspMonthly || 0))}
+            onChange={val => updatePerson('he', 'extraContributionMonthly', val)}
           />
         </div>
         <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '4px' }}>
-          TFSA contributions are after-tax. RRSP contributions are tax-deductible.
+          Today&apos;s $. Same path as ESPP: He TFSA → She TFSA → He RRSP / Spousal (if secondary) / Non-reg by MV ranking.
         </p>
       </div>
 

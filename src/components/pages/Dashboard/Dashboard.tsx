@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   type PersonInput,
   type ChildInput,
@@ -14,8 +14,11 @@ import {
   AllocationPolicy,
   type AccountBuckets,
 } from '../../../types/calculator';
-import { calculateHouseholdTax } from '../../../utils/taxCalc';
-import { runProjection, solveRequiredSavings, calculateMinSavingsRequired } from '../../../utils/retirementCalc';
+import { calculateHouseholdTax, marginalIncomeTaxRate } from '../../../utils/taxCalc';
+import {
+  runProjection,
+  bucketsAtRetirementFromProjection,
+} from '../../../utils/retirementCalc';
 import {
   LOCAL_STORAGE_KEY,
   DEFAULT_TAX_CONFIG,
@@ -29,6 +32,12 @@ import {
   totalInvestable,
 } from '../../../utils/taxRates';
 import { calculatePlanTargets } from '../../../utils/targetEngine';
+import { resolveEarnerRoles } from '../../../utils/earnerRoles';
+import {
+  explainExcessMoney,
+  personInputsFromExtraAllocation,
+  resolveExtraContributionMonthly,
+} from '../../../utils/excessMoneyGuide';
 import { SummaryCards } from './components/SummaryCards';
 import { MetricStrip } from './components/MetricStrip';
 import { InputSection } from './components/InputSection';
@@ -40,7 +49,17 @@ import { Header } from '../../shared/Header';
 import { ScenarioSelector } from './components/ScenarioSelector';
 import { MinSavingsPanel } from './components/MinSavingsPanel';
 import { ConversionGuidePanel } from './components/ConversionGuidePanel';
-import { EsppAllocationGuide } from './components/EsppAllocationGuide';
+import { ExcessRoomPanel } from './components/ExcessRoomPanel';
+import { withCppStartYear } from '../../../utils/personInputMigrate';
+import {
+  analyzeRetirementShortfall,
+  solveEarliestJointRetirement,
+  solveExtraForReadiness,
+} from '../../../utils/retirementShortfall';
+import {
+  DEFAULT_LIFE_EXPECTANCY_DELTA,
+  resolveRetirementHorizon,
+} from '../../../utils/retirementHorizon';
 
 export const Dashboard: React.FC = () => {
   const getSavedData = () => {
@@ -62,11 +81,15 @@ export const Dashboard: React.FC = () => {
     if (savedData?.heInput) {
       const merged = { ...INITIAL_HE, ...savedData.heInput };
       if (merged.otherSavingsTfsaMonthly === undefined && merged.otherSavingsRrspMonthly === undefined) {
-        const oldVal = (savedData.heInput as any).otherSavingsMonthly || 0;
+        const oldVal = (savedData.heInput as { otherSavingsMonthly?: number }).otherSavingsMonthly || 0;
         merged.otherSavingsTfsaMonthly = oldVal;
         merged.otherSavingsRrspMonthly = 0;
       }
-      return merged;
+      if (merged.extraContributionMonthly === undefined) {
+        merged.extraContributionMonthly =
+          (merged.otherSavingsTfsaMonthly || 0) + (merged.otherSavingsRrspMonthly || 0);
+      }
+      return withCppStartYear(merged);
     }
     return INITIAL_HE;
   });
@@ -75,11 +98,15 @@ export const Dashboard: React.FC = () => {
     if (savedData?.sheInput) {
       const merged = { ...INITIAL_SHE, ...savedData.sheInput };
       if (merged.otherSavingsTfsaMonthly === undefined && merged.otherSavingsRrspMonthly === undefined) {
-        const oldVal = (savedData.sheInput as any).otherSavingsMonthly || 0;
+        const oldVal = (savedData.sheInput as { otherSavingsMonthly?: number }).otherSavingsMonthly || 0;
         merged.otherSavingsTfsaMonthly = 0;
         merged.otherSavingsRrspMonthly = oldVal;
       }
-      return merged;
+      if (merged.extraContributionMonthly === undefined) {
+        merged.extraContributionMonthly =
+          (merged.otherSavingsTfsaMonthly || 0) + (merged.otherSavingsRrspMonthly || 0);
+      }
+      return withCppStartYear(merged);
     }
     return INITIAL_SHE;
   });
@@ -93,6 +120,7 @@ export const Dashboard: React.FC = () => {
   const [savingsTargetRate, setSavingsTargetRate] = useState<number>(() => savedData?.savingsTargetRate ?? 0.20);
   const [investmentReturnRate, setInvestmentReturnRate] = useState<number>(() => savedData?.investmentReturnRate ?? 0.05);
   const [inflationRate, setInflationRate] = useState<number>(() => savedData?.inflationRate ?? 0.02);
+  const [salaryGrowthRate, setSalaryGrowthRate] = useState<number>(() => savedData?.salaryGrowthRate ?? 0.01);
   const [desiredRetirementSpendMonthly, setDesiredRetirementSpendMonthly] = useState<number>(() => savedData?.desiredRetirementSpendMonthly ?? 10000);
   const [mandatoryRetirementSpendMonthly, setMandatoryRetirementSpendMonthly] = useState<number>(() => savedData?.mandatoryRetirementSpendMonthly ?? 7000);
   const [accountBuckets, setAccountBuckets] = useState<AccountBuckets>(() => savedData?.accountBuckets ?? {
@@ -104,15 +132,16 @@ export const Dashboard: React.FC = () => {
   const [currentSavings, setCurrentSavings] = useState<number>(() =>
     savedData?.currentSavings ?? totalInvestable(savedData?.accountBuckets ?? DEFAULT_ACCOUNT_BUCKETS)
   );
-  const [allocationPolicy, setAllocationPolicy] = useState<AllocationPolicy>(() =>
-    savedData?.allocationPolicy ?? AllocationPolicy.TFSA_FIRST
-  );
+  const [allocationPolicy] = useState<AllocationPolicy>(AllocationPolicy.TFSA_FIRST);
   const [survivorToggle, setSurvivorToggle] = useState<boolean>(() => savedData?.survivorToggle ?? false);
+  const [survivorSpendFactor, setSurvivorSpendFactor] = useState<number>(() => savedData?.survivorSpendFactor ?? 0.70);
   const [taxConfig, setTaxConfig] = useState<TaxConfig>(() => ({ ...DEFAULT_TAX_CONFIG, ...savedData?.taxConfig }));
   const [ccbConfig, setCcbConfig] = useState<CcbConfig>(() => ({ ...DEFAULT_CCB_CONFIG, ...savedData?.ccbConfig }));
   const [childCostConfig, setChildCostConfig] = useState<ChildCostConfig>(() => ({ ...DEFAULT_CHILD_COST, ...savedData?.childCostConfig }));
   const [parentalLeaveConfig, setParentalLeaveConfig] = useState<ParentalLeaveConfig>(() => ({ ...DEFAULT_PARENTAL_LEAVE, ...savedData?.parentalLeaveConfig }));
-  const [lifeExpectancyDelta, setLifeExpectancyDelta] = useState<number>(() => savedData?.lifeExpectancyDelta ?? 20);
+  const [lifeExpectancyDelta, setLifeExpectancyDelta] = useState<number>(
+    () => savedData?.lifeExpectancyDelta ?? DEFAULT_LIFE_EXPECTANCY_DELTA
+  );
   const [includeExtraIncome, setIncludeExtraIncome] = useState<boolean>(() => savedData?.includeExtraIncome ?? true);
   const [depositEsppToRrsp, setDepositEsppToRrsp] = useState<boolean>(() => savedData?.depositEsppToRrsp ?? false);
   const [esppRefundSaveRate, setEsppRefundSaveRate] = useState<number>(() => savedData?.esppRefundSaveRate ?? 0.50);
@@ -120,7 +149,6 @@ export const Dashboard: React.FC = () => {
   const [inflateAnnualTfsaLimit, setInflateAnnualTfsaLimit] = useState<boolean>(() => savedData?.inflateAnnualTfsaLimit ?? false);
   const [optimizeSpousalRrsp, setOptimizeSpousalRrsp] = useState<boolean>(() => savedData?.optimizeSpousalRrsp ?? false);
   const [spousalRrspMonthly, setSpousalRrspMonthly] = useState<number>(() => savedData?.spousalRrspMonthly ?? 0);
-  const [targetTaxAdvantageThreshold, setTargetTaxAdvantageThreshold] = useState<number>(() => savedData?.targetTaxAdvantageThreshold ?? 0.412);
 
   // UI state
   const [activeScenario, setActiveScenario] = useState<'realistic' | 'mandatory'>('realistic');
@@ -138,12 +166,14 @@ export const Dashboard: React.FC = () => {
       savingsTargetRate,
       investmentReturnRate,
       inflationRate,
+      salaryGrowthRate,
       desiredRetirementSpendMonthly,
       mandatoryRetirementSpendMonthly,
       currentSavings: totalInvestable(accountBuckets),
       accountBuckets,
       allocationPolicy,
       survivorToggle,
+      survivorSpendFactor,
       taxConfig,
       ccbConfig,
       childCostConfig,
@@ -156,7 +186,6 @@ export const Dashboard: React.FC = () => {
       inflateAnnualTfsaLimit,
       optimizeSpousalRrsp,
       spousalRrspMonthly,
-      targetTaxAdvantageThreshold,
     };
     localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(dataToStore));
   }, [
@@ -169,12 +198,14 @@ export const Dashboard: React.FC = () => {
     savingsTargetRate,
     investmentReturnRate,
     inflationRate,
+    salaryGrowthRate,
     desiredRetirementSpendMonthly,
     mandatoryRetirementSpendMonthly,
     currentSavings,
     accountBuckets,
     allocationPolicy,
     survivorToggle,
+    survivorSpendFactor,
     taxConfig,
     ccbConfig,
     childCostConfig,
@@ -187,7 +218,6 @@ export const Dashboard: React.FC = () => {
     inflateAnnualTfsaLimit,
     optimizeSpousalRrsp,
     spousalRrspMonthly,
-    targetTaxAdvantageThreshold,
   ]);
 
   const resetToDefaults = () => {
@@ -201,11 +231,11 @@ export const Dashboard: React.FC = () => {
       setSavingsTargetRate(0.20);
       setInvestmentReturnRate(0.05);
       setInflationRate(0.02);
+      setSalaryGrowthRate(0.01);
       setDesiredRetirementSpendMonthly(10000);
       setMandatoryRetirementSpendMonthly(7000);
       setAccountBuckets(DEFAULT_ACCOUNT_BUCKETS);
       setCurrentSavings(totalInvestable(DEFAULT_ACCOUNT_BUCKETS));
-      setAllocationPolicy(AllocationPolicy.TFSA_FIRST);
       setSurvivorToggle(false);
       setTaxConfig(DEFAULT_TAX_CONFIG);
       setCcbConfig(DEFAULT_CCB_CONFIG);
@@ -224,22 +254,8 @@ export const Dashboard: React.FC = () => {
   };
 
   const currentYear = new Date().getFullYear();
-  const currentHeInputForTax = includeExtraIncome ? heInput : { ...heInput, extraIncomeMonthly: 0 };
-  const currentSheInputForTax = includeExtraIncome ? sheInput : { ...sheInput, extraIncomeMonthly: 0 };
 
-  const currentHouseholdTax = calculateHouseholdTax(
-    currentHeInputForTax,
-    currentSheInputForTax,
-    children.filter(ch => (ch.birthAgeHe ?? (heInput.age - ch.age)) <= heInput.age),
-    savingsBase,
-    savingsTargetRate,
-    taxConfig,
-    ccbConfig,
-    depositEsppToRrsp,
-    optimizeSpousalRrsp ? spousalRrspMonthly : 0
-  );
-
-  const plan: RetirementPlan = {
+  const planBase: RetirementPlan = {
     heInput,
     sheInput,
     children,
@@ -249,12 +265,14 @@ export const Dashboard: React.FC = () => {
     savingsTargetRate,
     investmentReturnRate,
     inflationRate,
+    salaryGrowthRate,
     desiredRetirementSpendMonthly,
     mandatoryRetirementSpendMonthly,
     currentSavings: totalInvestable(accountBuckets),
     accountBuckets,
     allocationPolicy,
     survivorToggle,
+    survivorSpendFactor,
     annualTfsaLimit,
     inflateAnnualTfsaLimit,
     taxConfig,
@@ -269,28 +287,216 @@ export const Dashboard: React.FC = () => {
     spousalRrspMonthly,
   };
 
-  const planTargets = calculatePlanTargets(plan, currentYear, activeScenario === 'mandatory');
-  const realisticProjection = runProjection(plan, currentYear, false);
-  const mandatoryProjection = runProjection(plan, currentYear, true);
+  const guideLive = useMemo(
+    () => explainExcessMoney(planBase, { currentYear }),
+    // planBase fields are primitives/state — rebuild when any planner input changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      heInput,
+      sheInput,
+      children,
+      expenses,
+      factors,
+      savingsBase,
+      savingsTargetRate,
+      investmentReturnRate,
+      inflationRate,
+      salaryGrowthRate,
+      desiredRetirementSpendMonthly,
+      mandatoryRetirementSpendMonthly,
+      accountBuckets,
+      allocationPolicy,
+      survivorToggle,
+      survivorSpendFactor,
+      annualTfsaLimit,
+      inflateAnnualTfsaLimit,
+      taxConfig,
+      depositEsppToRrsp,
+      esppRefundSaveRate,
+      optimizeSpousalRrsp,
+      includeExtraIncome,
+      lifeExpectancyDelta,
+      currentYear,
+    ]
+  );
+  const allocated = useMemo(
+    () => personInputsFromExtraAllocation(planBase, guideLive),
+    // guideLive already tracks plan inputs; avoid planBase identity churn
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [guideLive]
+  );
+  const effectiveSpousalMonthly = optimizeSpousalRrsp
+    ? (guideLive.combinedMvRouting?.toSpousal ??
+        guideLive.mvHe.suggestedSplit.toSpousal +
+          guideLive.mvShe.suggestedSplit.toSpousal) /
+      12
+    : 0;
+  const earnerRoles = resolveEarnerRoles(planBase);
+
+  const heForEngines = {
+    ...allocated.heInput,
+    extraContributionMonthly: resolveExtraContributionMonthly(heInput),
+    extraIncomeMonthly: includeExtraIncome ? heInput.extraIncomeMonthly : 0,
+  };
+  const sheForEngines = {
+    ...allocated.sheInput,
+    extraContributionMonthly: resolveExtraContributionMonthly(sheInput),
+    extraIncomeMonthly: includeExtraIncome ? sheInput.extraIncomeMonthly : 0,
+  };
+
+  const currentHouseholdTax = useMemo(
+    () =>
+      calculateHouseholdTax(
+        heForEngines,
+        sheForEngines,
+        children.filter(ch => (ch.birthAgeHe ?? (heInput.age - ch.age)) <= heInput.age),
+        savingsBase,
+        savingsTargetRate,
+        taxConfig,
+        ccbConfig,
+        depositEsppToRrsp,
+        effectiveSpousalMonthly,
+        heInput.carryForwardRrspRoom ?? 0,
+        sheInput.carryForwardRrspRoom ?? 0,
+        earnerRoles.primary
+      ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [heForEngines, sheForEngines, children, savingsBase, savingsTargetRate, taxConfig, ccbConfig, depositEsppToRrsp, effectiveSpousalMonthly]
+  );
+
+  const plan: RetirementPlan = useMemo(
+    () => ({
+      ...planBase,
+      heInput: {
+        ...allocated.heInput,
+        extraContributionMonthly: resolveExtraContributionMonthly(heInput),
+        extraIncomeMonthly: heInput.extraIncomeMonthly,
+      },
+      sheInput: {
+        ...allocated.sheInput,
+        extraContributionMonthly: resolveExtraContributionMonthly(sheInput),
+        extraIncomeMonthly: sheInput.extraIncomeMonthly,
+      },
+      includeExtraIncome,
+      spousalRrspMonthly: effectiveSpousalMonthly,
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [planBase, allocated, heInput, sheInput, includeExtraIncome, effectiveSpousalMonthly]
+  );
+
+  const planTargets = useMemo(() => {
+    const useMandatory = activeScenario === 'mandatory';
+    // Nest egg starts on the cash-aware path (children/leave). The target engine
+    // adds marginal solver Extra to that same baseline and expands uncapped.
+    return calculatePlanTargets(plan, currentYear, useMandatory, {
+      accumulate: (p, monthly, year) =>
+        bucketsAtRetirementFromProjection(p, monthly, year, useMandatory),
+    });
+  }, [plan, currentYear, activeScenario]);
+
+  // Projection viewer uses the same recommended conversion ages as Min Savings / target engine.
+  const planForProjection: RetirementPlan = useMemo(
+    () => ({
+      ...plan,
+      conversionAgeHe: planTargets.recommendedConversion.conversionAgeHe,
+      conversionAgeShe: planTargets.recommendedConversion.conversionAgeShe,
+    }),
+    [plan, planTargets.recommendedConversion.conversionAgeHe, planTargets.recommendedConversion.conversionAgeShe]
+  );
+
+  const realisticProjection = useMemo(
+    () => runProjection(planForProjection, currentYear, false),
+    [planForProjection, currentYear]
+  );
+  const mandatoryProjection = useMemo(
+    () => runProjection(planForProjection, currentYear, true),
+    [planForProjection, currentYear]
+  );
   const activeProjection = activeScenario === 'realistic' ? realisticProjection : mandatoryProjection;
 
-  const realisticSolved = solveRequiredSavings(plan, false);
-  const mandatorySolved = solveRequiredSavings(plan, true);
-  const minSavingsResult = calculateMinSavingsRequired(plan, currentYear, activeScenario === 'mandatory');
+  // Reuse planTargets — avoid a second calculatePlanTargets inside calculateMinSavingsRequired
+  const minSavingsResult = useMemo(() => {
+    const useMandatory = activeScenario === 'mandatory';
+    const projection = runProjection(
+      planForProjection,
+      currentYear,
+      useMandatory,
+      planTargets.monthlyPersonalSavingsNeeded
+    );
+    return {
+      monthlySavingsNeeded: planTargets.monthlyPersonalSavingsNeeded,
+      nestEgg: planTargets.projectedNestEggAtRetirement,
+      portfolioCurve: planTargets.portfolioCurve,
+      annualSpendCurve: planTargets.annualSpendCurve,
+      shortfallFromCurrent: planTargets.shortfallFromCurrentPath,
+      isFunded: planTargets.isFundedWithoutExtra,
+      firstYearPensionGross: planTargets.firstYearPensionGross,
+      projection,
+      regime: planTargets.regime,
+      recommendedConversion: planTargets.recommendedConversion,
+      runnersUp: planTargets.runnersUp,
+      allocationPolicy: planTargets.allocationPolicy,
+      surplusSpend: planTargets.surplusSpend,
+      currentPathPortfolioCurve: planTargets.currentPathPortfolioCurve,
+      currentPathBucketCurves: planTargets.currentPathBucketCurves,
+      requiredNestEggToZero: planTargets.requiredNestEggToZero,
+      requiredNestEggToZeroCurve: planTargets.requiredNestEggToZeroCurve,
+      nestEggToZeroBand: planTargets.nestEggToZeroBand,
+      bucketCurves: planTargets.bucketCurves,
+      bucketsAtRetirement: planTargets.bucketsAtRetirement,
+      projectedNestEggAtRetirement: planTargets.projectedNestEggAtRetirement,
+      projectedBucketsAtRetirement: planTargets.projectedBucketsAtRetirement,
+      solvedNestEggAtRetirement: planTargets.nestEggAtRetirement,
+    };
+  }, [planForProjection, currentYear, activeScenario, planTargets]);
 
-  let yearsSecure = heInput.retirementAge + lifeExpectancyDelta;
-  const recCurve = planTargets.recommendedConversion.curve;
-  for (const row of recCurve) {
-    if (row.shortfall > 1) {
-      yearsSecure = row.ageHe;
-      break;
-    }
-  }
-  if (planTargets.recommendedConversion.yearsFunded >= planTargets.recommendedConversion.horizonYears) {
-    yearsSecure = heInput.retirementAge + lifeExpectancyDelta;
-  }
+  // Retirement Readiness must follow the active projection (Plot 1), not the
+  // conversion-grid winner on the *solved* nest egg — that path assumes the
+  // extra monthly savings and would claim "lasts to horizon" while current path depletes.
+  const endAgeHorizon = resolveRetirementHorizon({
+    heInput,
+    lifeExpectancyDelta,
+  }).terminalAgeHe;
+  // Shared with the Retirement Monthly Deficit card so the two never disagree at
+  // the horizon boundary: a gap in the *final* year (age == last funded year) is a
+  // real shortfall, not "lasts to horizon+".
+  const retirementShortfall = analyzeRetirementShortfall(activeProjection);
+  const lastsFullHorizon = retirementShortfall.lastsFullHorizon;
+  const yearsSecure = retirementShortfall.firstShortfallAge ?? endAgeHorizon;
+  const currentSavingsMonthly = (activeProjection[0]?.actualSavings ?? 0) / 12;
 
-  const totalPensionAnnual = planTargets.firstYearPensionGross * 0.85; // display approx net; card labels gross elsewhere
+  // Extra $/mo that turns Retirement Readiness green (viewer path) — distinct from backsolve.
+  const readinessExtra = useMemo(() => {
+    if (lastsFullHorizon) return { monthly: 0, reached: true as const };
+    return solveExtraForReadiness(
+      planForProjection,
+      currentYear,
+      activeScenario === 'mandatory'
+    );
+  }, [planForProjection, currentYear, activeScenario, lastsFullHorizon]);
+
+  const readinessNestEgg = useMemo(() => {
+    if (!readinessExtra.reached) return null;
+    return totalInvestable(
+      bucketsAtRetirementFromProjection(
+        planForProjection,
+        readinessExtra.monthly,
+        currentYear,
+        activeScenario === 'mandatory'
+      )
+    );
+  }, [planForProjection, readinessExtra, currentYear, activeScenario]);
+
+  const earliestRetirement = useMemo(
+    () =>
+      solveEarliestJointRetirement(
+        planForProjection,
+        currentYear,
+        activeScenario === 'mandatory',
+        endAgeHorizon
+      ),
+    [planForProjection, currentYear, activeScenario, endAgeHorizon]
+  );
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
@@ -300,6 +506,12 @@ export const Dashboard: React.FC = () => {
         <main style={{ maxWidth: '1600px', margin: '0 auto', width: '100%', padding: '24px', display: 'flex', flexDirection: 'column', gap: '24px' }}>
           <div className="dashboard-grid" style={{ padding: 0, margin: 0, maxWidth: 'none', width: '100%' }}>
             <aside style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+              <ScenarioSelector
+                activeScenario={activeScenario}
+                setActiveScenario={setActiveScenario}
+                includeExtraIncome={includeExtraIncome}
+                setIncludeExtraIncome={setIncludeExtraIncome}
+              />
                <InputSection
                 heInput={heInput}
                 sheInput={sheInput}
@@ -309,6 +521,7 @@ export const Dashboard: React.FC = () => {
                 savingsTargetRate={savingsTargetRate}
                 investmentReturnRate={investmentReturnRate}
                 inflationRate={inflationRate}
+                salaryGrowthRate={salaryGrowthRate}
                 desiredRetirementSpendMonthly={desiredRetirementSpendMonthly}
                 mandatoryRetirementSpendMonthly={mandatoryRetirementSpendMonthly}
                 currentSavings={currentSavings}
@@ -318,14 +531,6 @@ export const Dashboard: React.FC = () => {
                 activeScenario={activeScenario}
                 includeExtraIncome={includeExtraIncome}
                 optimizeSpousalRrsp={optimizeSpousalRrsp}
-                targetTaxAdvantageThreshold={targetTaxAdvantageThreshold}
-                onSpousalPlanUpdate={({ optimizeSpousalRrsp: opt, spousalRrspMonthly, targetTaxAdvantageThreshold: newThreshold }) => {
-                  setOptimizeSpousalRrsp(opt);
-                  setSpousalRrspMonthly(spousalRrspMonthly);
-                  if (newThreshold !== undefined) {
-                    setTargetTaxAdvantageThreshold(newThreshold);
-                  }
-                }}
                 setHeInput={setHeInput}
                 setSheInput={setSheInput}
                 setChildren={setChildren}
@@ -334,6 +539,7 @@ export const Dashboard: React.FC = () => {
                 setSavingsTargetRate={setSavingsTargetRate}
                 setInvestmentReturnRate={setInvestmentReturnRate}
                 setInflationRate={setInflationRate}
+                setSalaryGrowthRate={setSalaryGrowthRate}
                 setDesiredRetirementSpendMonthly={setDesiredRetirementSpendMonthly}
                 setMandatoryRetirementSpendMonthly={setMandatoryRetirementSpendMonthly}
                 setCurrentSavings={(v) => {
@@ -358,90 +564,130 @@ export const Dashboard: React.FC = () => {
                 setAnnualTfsaLimit={setAnnualTfsaLimit}
                 inflateAnnualTfsaLimit={inflateAnnualTfsaLimit}
                 setInflateAnnualTfsaLimit={setInflateAnnualTfsaLimit}
+                survivorToggle={survivorToggle}
+                setSurvivorToggle={setSurvivorToggle}
+                survivorSpendFactor={survivorSpendFactor}
+                setSurvivorSpendFactor={setSurvivorSpendFactor}
+                setOptimizeSpousalRrsp={(enable) => {
+                  setOptimizeSpousalRrsp(enable);
+                  if (!enable) setSpousalRrspMonthly(0);
+                }}
               />
               <FactorsSection factors={factors} setFactors={setFactors} heAge={heInput.age} />
             </aside>
 
             <section style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-              <ScenarioSelector
+              <MinSavingsPanel
+                plan={plan}
                 activeScenario={activeScenario}
-                setActiveScenario={setActiveScenario}
-                includeExtraIncome={includeExtraIncome}
-                setIncludeExtraIncome={setIncludeExtraIncome}
+                planTargets={planTargets}
+                yearsSecure={yearsSecure}
+                lastsFullHorizon={lastsFullHorizon}
+                currentSavingsMonthly={currentSavingsMonthly}
+                readinessExtraMonthly={readinessExtra.monthly}
+                readinessExtraReached={readinessExtra.reached}
+                readinessNestEgg={readinessNestEgg}
+                earliestRetirement={earliestRetirement}
+                showOutlook
+                showPlanBasis={false}
               />
 
               <SummaryCards
                 householdTax={currentHouseholdTax}
                 savingsBase={savingsBase}
                 savingsTargetRate={savingsTargetRate}
-                yearsSecure={yearsSecure}
-                totalPension={totalPensionAnnual}
                 unallocatedCash={activeProjection[0].unallocatedCash}
                 ccbBenefitMonthly={activeProjection[0].ccbBenefit / 12}
                 childCostsMonthly={activeProjection[0].childCosts / 12}
-                currentSavingsMonthly={realisticSolved.currentSavingsMonthly}
-                realisticRequired={realisticSolved.requiredSavingsMonthly}
-                mandatoryRequired={mandatorySolved.requiredSavingsMonthly}
-                lifeExpectancyAge={heInput.retirementAge + lifeExpectancyDelta}
-                minSavingsNestEgg={planTargets.nestEggAtRetirement}
-                minSavingsMonthlyNeeded={planTargets.monthlyPersonalSavingsNeeded}
-                minSavingsShortfall={planTargets.shortfallFromCurrentPath}
-                minSavingsIsFunded={planTargets.isFundedWithoutExtra}
-                yearsToRetirement={Math.max(0, heInput.retirementAge - heInput.age)}
-                inflationRate={inflationRate}
-                retirementAgeHe={heInput.retirementAge}
-                activeScenario={activeScenario}
-                fundingRegime={planTargets.regime}
-                conversionAgeHe={planTargets.recommendedConversion.conversionAgeHe}
-                conversionAgeShe={planTargets.recommendedConversion.conversionAgeShe}
-                conversionWhy={`Solved min $ @71; recommend He@${planTargets.recommendedConversion.conversionAgeHe} / She@${planTargets.recommendedConversion.conversionAgeShe} (${planTargets.regime})`}
-                lifeExpectancyDelta={lifeExpectancyDelta}
-                survivorToggle={survivorToggle}
-                onSurvivorToggle={setSurvivorToggle}
-                allocationPolicy={allocationPolicy}
-                onAllocationPolicy={setAllocationPolicy}
               />
-
-              <MinSavingsPanel plan={plan} activeScenario={activeScenario} planTargets={planTargets} />
-
-              <ConversionGuidePanel
-                ranking={planTargets.conversionRanking ?? [planTargets.recommendedConversion, ...(planTargets.runnersUp ?? [])]}
-                regime={planTargets.regime}
-                endAge={heInput.retirementAge + lifeExpectancyDelta}
-              />
-
-              <EsppAllocationGuide plan={plan} onAllocationPolicy={setAllocationPolicy} />
 
               <MetricStrip
                 projection={activeProjection}
-                heCurrentAge={heInput.age}
-                heRetirementAge={heInput.retirementAge}
-                sheCurrentAge={sheInput.age}
-                sheRetirementAge={sheInput.retirementAge}
                 effectiveTaxRateHe={currentHouseholdTax.he.salary > 0 ? currentHouseholdTax.he.totalIncomeTax / currentHouseholdTax.he.salary : 0}
                 effectiveTaxRateShe={currentHouseholdTax.she.salary > 0 ? currentHouseholdTax.she.totalIncomeTax / currentHouseholdTax.she.salary : 0}
+                marginalTaxRateHe={marginalIncomeTaxRate(currentHouseholdTax.he.taxableIncome, taxConfig, {
+                  cppBaseForCredit: currentHouseholdTax.he.cppBaseContribution,
+                  eiPremium: currentHouseholdTax.he.eiPremium,
+                })}
+                marginalTaxRateShe={marginalIncomeTaxRate(currentHouseholdTax.she.taxableIncome, taxConfig, {
+                  cppBaseForCredit: currentHouseholdTax.she.cppBaseContribution,
+                  eiPremium: currentHouseholdTax.she.eiPremium,
+                })}
                 totalHouseholdGross={currentHouseholdTax.totalHouseholdGross}
                 totalIncomeTaxHe={currentHouseholdTax.he.totalIncomeTax}
                 totalIncomeTaxShe={currentHouseholdTax.she.totalIncomeTax}
               />
 
+              <MinSavingsPanel
+                plan={plan}
+                activeScenario={activeScenario}
+                planTargets={planTargets}
+                yearsSecure={yearsSecure}
+                lastsFullHorizon={lastsFullHorizon}
+                currentSavingsMonthly={currentSavingsMonthly}
+                readinessExtraMonthly={readinessExtra.monthly}
+                readinessExtraReached={readinessExtra.reached}
+                readinessNestEgg={readinessNestEgg}
+                earliestRetirement={earliestRetirement}
+                showOutlook={false}
+                showPlanBasis
+              />
+
               <ProjectionChart
                 realisticData={realisticProjection}
                 mandatoryData={mandatoryProjection}
+                earliestRetireAgeHe={
+                  earliestRetirement.lastsAtEntered && earliestRetirement.yearsEarlier > 0
+                    ? earliestRetirement.heRetireAge
+                    : undefined
+                }
                 minSavingsData={minSavingsResult.projection.map((row, idx) => {
-                  // Overlay target-engine depletion onto projection rows where possible
-                  const curve = planTargets.portfolioCurve;
+                  // Post-retire: same series as Min Savings green dashed (Portfolio → $0).
+                  // Values are start-of-year balances (curve[i]); Plot 1 uses plot1PortfolioBalance
+                  // so Realistic/Mandatory retired points use portfolioStart too.
+                  // Pre-retire: keep accumulation path on the full-life chart.
+                  const deplete = planTargets.surplusSpend?.depletePortfolioCurve;
+                  const curve =
+                    deplete && deplete.length > 0
+                      ? deplete
+                      : !planTargets.isFundedWithoutExtra &&
+                          planTargets.currentPathPortfolioCurve?.length
+                        ? planTargets.currentPathPortfolioCurve
+                        : planTargets.portfolioCurve;
                   if (row.isRetired && curve.length > 0) {
                     const retireIdx = minSavingsResult.projection.findIndex(r => r.isRetired);
                     const i = idx - retireIdx;
+                    // Same index as Min Savings Year i / depletePortfolioCurve[i]
+                    // (do not use i+1 — that shifted Plot 1 one year ahead of the green →$0 line).
                     if (i >= 0 && i < curve.length) {
-                      return { ...row, portfolioEnd: curve[Math.min(i + 1, curve.length - 1)] ?? row.portfolioEnd, portfolioStart: curve[i] ?? row.portfolioStart };
+                      return {
+                        ...row,
+                        portfolioEnd: curve[i] ?? row.portfolioEnd,
+                        portfolioStart: curve[i] ?? row.portfolioStart,
+                      };
                     }
                   }
                   return row;
                 })}
                 activeScenario={activeScenario}
                 retirementAgeHe={heInput.retirementAge}
+              />
+
+              <ConversionGuidePanel
+                ranking={planTargets.conversionRanking ?? [planTargets.recommendedConversion, ...(planTargets.runnersUp ?? [])]}
+                regime={planTargets.regime}
+                endAge={resolveRetirementHorizon({ heInput, lifeExpectancyDelta }).terminalAgeHe}
+              />
+
+              <ExcessRoomPanel
+                plan={plan}
+                currentYear={currentYear}
+                isFundedWithoutExtra={planTargets.isFundedWithoutExtra}
+                excessGuide={guideLive}
+                onOptimizeSpousal={(enable, monthly) => {
+                  setOptimizeSpousalRrsp(enable);
+                  setSpousalRrspMonthly(monthly);
+                }}
               />
             </section>
           </div>

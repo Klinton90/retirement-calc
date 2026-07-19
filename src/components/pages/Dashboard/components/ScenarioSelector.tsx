@@ -14,16 +14,25 @@ export const ScenarioSelector: React.FC<ScenarioSelectorProps> = ({
   setIncludeExtraIncome,
 }) => {
   return (
-    <div className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '14px 20px', flexWrap: 'wrap', gap: '12px' }}>
+    <div
+      className="card"
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'stretch',
+        padding: '16px',
+        gap: '12px',
+      }}
+    >
       <div>
         <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--text-secondary)' }}>CALCULATION SCENARIO</span>
         <p style={{ fontSize: '12px', color: 'var(--text-muted)', margin: '2px 0 0 0' }}>
           Select budget path to inspect metrics, cash surplus, and details. Both lines are plotted in the chart.
         </p>
       </div>
-      <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', alignItems: 'center' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
         {/* Scenario Selector */}
-        <div style={{ display: 'flex', gap: '6px', background: 'rgba(255,255,255,0.02)', padding: '3px', borderRadius: '6px', border: '1px solid var(--border-color)' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px', background: 'rgba(255,255,255,0.02)', padding: '3px', borderRadius: '6px', border: '1px solid var(--border-color)' }}>
           <button
             onClick={() => setActiveScenario('realistic')}
             style={{
@@ -57,7 +66,7 @@ export const ScenarioSelector: React.FC<ScenarioSelectorProps> = ({
         </div>
 
         {/* Extra Income Toggle */}
-        <div style={{ display: 'flex', gap: '6px', background: 'rgba(255,255,255,0.02)', padding: '3px', borderRadius: '6px', border: '1px solid var(--border-color)' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px', background: 'rgba(255,255,255,0.02)', padding: '3px', borderRadius: '6px', border: '1px solid var(--border-color)' }}>
           <button
             onClick={() => setIncludeExtraIncome(true)}
             style={{

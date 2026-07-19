@@ -5,13 +5,12 @@ import {
   type ExpenseInput,
   SavingsBase,
 } from '../../../../types/calculator';
-import { User, Users, DollarSign, Settings, Sparkles } from 'lucide-react';
+import { User, Users, DollarSign, Settings } from 'lucide-react';
 import { HeInputs } from './HeInputs';
 import { SheInputs } from './SheInputs';
 import { ChildrenInputs } from './ChildrenInputs';
 import { ExpensesInputs } from './ExpensesInputs';
 import { GlobalConstantsInputs } from './GlobalConstantsInputs';
-import { SpousalRrspAdvisor } from './SpousalRrspAdvisor';
 import { AccordionItem } from '../../../shared/AccordionItem';
 
 interface InputSectionProps {
@@ -23,6 +22,7 @@ interface InputSectionProps {
   savingsTargetRate: number;
   investmentReturnRate: number;
   inflationRate: number;
+  salaryGrowthRate: number;
   desiredRetirementSpendMonthly: number;
   mandatoryRetirementSpendMonthly: number;
   currentSavings: number;
@@ -32,12 +32,6 @@ interface InputSectionProps {
   activeScenario: 'realistic' | 'mandatory';
   includeExtraIncome: boolean;
   optimizeSpousalRrsp: boolean;
-  targetTaxAdvantageThreshold: number;
-  onSpousalPlanUpdate: (updates: {
-    optimizeSpousalRrsp: boolean;
-    spousalRrspMonthly: number;
-    targetTaxAdvantageThreshold?: number;
-  }) => void;
 
   setHeInput: React.Dispatch<React.SetStateAction<PersonInput>>;
   setSheInput: React.Dispatch<React.SetStateAction<PersonInput>>;
@@ -47,6 +41,7 @@ interface InputSectionProps {
   setSavingsTargetRate: (rate: number) => void;
   setInvestmentReturnRate: (rate: number) => void;
   setInflationRate: (rate: number) => void;
+  setSalaryGrowthRate: (rate: number) => void;
   setDesiredRetirementSpendMonthly: (val: number) => void;
   setMandatoryRetirementSpendMonthly: (val: number) => void;
   setCurrentSavings: (val: number) => void;
@@ -57,6 +52,11 @@ interface InputSectionProps {
   setAnnualTfsaLimit: (val: number) => void;
   inflateAnnualTfsaLimit: boolean;
   setInflateAnnualTfsaLimit: (val: boolean) => void;
+  survivorToggle: boolean;
+  setSurvivorToggle: (val: boolean) => void;
+  survivorSpendFactor: number;
+  setSurvivorSpendFactor: (val: number) => void;
+  setOptimizeSpousalRrsp: (val: boolean) => void;
 }
 
 export const InputSection: React.FC<InputSectionProps> = ({
@@ -68,6 +68,7 @@ export const InputSection: React.FC<InputSectionProps> = ({
   savingsTargetRate,
   investmentReturnRate,
   inflationRate,
+  salaryGrowthRate,
   desiredRetirementSpendMonthly,
   mandatoryRetirementSpendMonthly,
   currentSavings,
@@ -77,8 +78,6 @@ export const InputSection: React.FC<InputSectionProps> = ({
   activeScenario,
   includeExtraIncome,
   optimizeSpousalRrsp,
-  targetTaxAdvantageThreshold,
-  onSpousalPlanUpdate,
   setHeInput,
   setSheInput,
   setChildren,
@@ -87,6 +86,7 @@ export const InputSection: React.FC<InputSectionProps> = ({
   setSavingsTargetRate,
   setInvestmentReturnRate,
   setInflationRate,
+  setSalaryGrowthRate,
   setDesiredRetirementSpendMonthly,
   setMandatoryRetirementSpendMonthly,
   setCurrentSavings,
@@ -97,6 +97,11 @@ export const InputSection: React.FC<InputSectionProps> = ({
   setAnnualTfsaLimit,
   inflateAnnualTfsaLimit,
   setInflateAnnualTfsaLimit,
+  survivorToggle,
+  setSurvivorToggle,
+  survivorSpendFactor,
+  setSurvivorSpendFactor,
+  setOptimizeSpousalRrsp,
 }) => {
   const [openSection, setOpenSection] = useState<string>('he');
 
@@ -174,6 +179,8 @@ export const InputSection: React.FC<InputSectionProps> = ({
           setInvestmentReturnRate={setInvestmentReturnRate}
           inflationRate={inflationRate}
           setInflationRate={setInflationRate}
+          salaryGrowthRate={salaryGrowthRate}
+          setSalaryGrowthRate={setSalaryGrowthRate}
           desiredRetirementSpendMonthly={desiredRetirementSpendMonthly}
           setDesiredRetirementSpendMonthly={setDesiredRetirementSpendMonthly}
           mandatoryRetirementSpendMonthly={mandatoryRetirementSpendMonthly}
@@ -188,26 +195,12 @@ export const InputSection: React.FC<InputSectionProps> = ({
           setInflateAnnualTfsaLimit={setInflateAnnualTfsaLimit}
           heInput={heInput}
           activeScenario={activeScenario}
-        />
-      </AccordionItem>
-
-      {/* 6. ADVANCED — Spousal RRSP (working-years tax tool; not target-engine core) */}
-      <AccordionItem
-        id="spousal"
-        label={`ADVANCED: SPOUSAL RRSP${optimizeSpousalRrsp ? ' (ON)' : ''}`}
-        icon={Sparkles}
-        isOpen={openSection === 'spousal'}
-        onToggle={() => setOpenSection(openSection === 'spousal' ? '' : 'spousal')}
-      >
-        <SpousalRrspAdvisor
-          embedded
-          heInput={heInput}
-          sheInput={sheInput}
+          survivorToggle={survivorToggle}
+          setSurvivorToggle={setSurvivorToggle}
+          survivorSpendFactor={survivorSpendFactor}
+          setSurvivorSpendFactor={setSurvivorSpendFactor}
           optimizeSpousalRrsp={optimizeSpousalRrsp}
-          depositEsppToRrsp={depositEsppToRrsp}
-          includeExtraIncome={includeExtraIncome}
-          targetTaxAdvantageThreshold={targetTaxAdvantageThreshold}
-          onUpdatePlan={onSpousalPlanUpdate}
+          setOptimizeSpousalRrsp={setOptimizeSpousalRrsp}
         />
       </AccordionItem>
     </div>

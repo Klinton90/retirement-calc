@@ -1,28 +1,48 @@
-import { AllocationPolicy, ContributionType, type RetirementPlan } from '../types/calculator';
-import { deployAnnualContributions, type RoomState } from './contributionPolicy';
+/**
+ * This-year ESPP sale redeploy on rooms after Extra — locked ownership cascade display.
+ * Nest-egg Extra/ESPP path uses MV (ADR 0003); this guide is informational for ESPP vs Extra crowding.
+ */
+import { AllocationPolicy, ContributionType, FamilyMember, type RetirementPlan } from '../types/calculator';
+import {
+  deployAnnualContributions,
+  preferDiscretionaryRrspOwner,
+  type RoomState,
+} from './contributionPolicy';
 import { resolveBuckets } from './accountBuckets';
+import {
+  computeSoftCapacity,
+  consumeTfsaForExtra,
+  resolveExtraContributionMonthly,
+} from './excessMoneyGuide';
+import { resolveEarnerRoles } from './earnerRoles';
 
 export interface EsppSplit {
   toTfsa: number;
   toRrsp: number;
   toNonReg: number;
+  toTfsaHe: number;
+  toTfsaShe: number;
+  toRrspHe: number;
+  toRrspShe: number;
 }
 
 export interface EsppAllocationGuideResult {
-  /** Employee + employer ESPP cash (sold) this year, CAD. */
   esppCashAnnual: number;
-  /** He payroll RRSP (employee) — always RRSP, not ESPP choice. */
   payrollRrspHe: number;
   payrollRrspShe: number;
   employerMatchHe: number;
   employerMatchShe: number;
+  /** Opening carry-forward rooms (before Extra eats TFSA). */
   rooms: RoomState;
-  underTfsaFirst: EsppSplit;
-  underRrspFirst: EsppSplit;
-  activePolicy: AllocationPolicy;
-  activeSplit: EsppSplit;
-  /** Policy that minimizes non-reg overflow, then maximizes TFSA fill. */
-  suggestedPolicy: AllocationPolicy;
+  /** Rooms left after Extra He → Extra She fill TFSA (what ESPP actually sees). */
+  roomsAfterExtra: RoomState;
+  /** TFSA consumed this year by Extra before ESPP. */
+  extraAteTfsa: number;
+  heExtraAnnual: number;
+  sheExtraAnnual: number;
+  /** He TFSA → She TFSA → preferred RRSP — on rooms *after* Extra. */
+  lockedCascade: EsppSplit;
+  preferredRrsp: FamilyMember;
   depositEsppToRrsp: boolean;
   summary: string;
 }
@@ -44,20 +64,20 @@ function payrollRrspAnnual(
   return type === ContributionType.PERCENTAGE ? (salary * value) / 100 : value * 12;
 }
 
-function scoreSplit(s: EsppSplit): number {
-  // Prefer less non-reg, then more TFSA (tax-free bridge), then RRSP
-  return -s.toNonReg * 1e9 + s.toTfsa * 1e3 + s.toRrsp;
-}
-
 /**
- * This-year ESPP sale redeploy preview under TFSA-first vs RRSP-first.
- * ESPP is not an account — cash after sale follows allocation policy (after match + payroll RRSP).
+ * This-year ESPP sale redeploy on rooms **after Extra** has taken TFSA:
+ * He TFSA → She TFSA → preferred spouse RRSP → other → Non-reg.
  */
 export function explainEsppAllocation(plan: RetirementPlan): EsppAllocationGuideResult {
   const he = plan.heInput;
   const she = plan.sheInput;
-  const esppCashAnnual =
-    (he.salary * (he.esppEmployeeRate || 0)) / 100 + (he.salary * (he.esppEmployerRate || 0)) / 100;
+  const heEsppCashAnnual =
+    (he.salary * (he.esppEmployeeRate || 0)) / 100 +
+    (he.salary * (he.esppEmployerRate || 0)) / 100;
+  const sheEsppCashAnnual =
+    (she.salary * (she.esppEmployeeRate || 0)) / 100 +
+    (she.salary * (she.esppEmployerRate || 0)) / 100;
+  const esppCashAnnual = heEsppCashAnnual + sheEsppCashAnnual;
   const payrollRrspHe = payrollRrspAnnual(he.salary, he.rrspEmployeeType, he.rrspEmployeeValue);
   const payrollRrspShe = payrollRrspAnnual(she.salary, she.rrspEmployeeType, she.rrspEmployeeValue);
   const employerMatchHe = (he.salary * (he.rrspEmployerRate || 0)) / 100;
@@ -65,45 +85,66 @@ export function explainEsppAllocation(plan: RetirementPlan): EsppAllocationGuide
   const rooms = roomsFromPlan(plan);
   const buckets = resolveBuckets(plan);
   const depositEsppToRrsp = !!plan.depositEsppToRrsp;
-  const personalInvestable = esppCashAnnual;
+  const personalInvestable = depositEsppToRrsp ? 0 : esppCashAnnual;
 
-  // ESPP-only routing (payroll/match are fixed → RRSP; not part of the "where to put ESPP" choice)
-  const run = (policy: AllocationPolicy): EsppSplit => {
-    const r = deployAnnualContributions({
-      personalInvestable,
-      payrollRrspHe: 0,
-      payrollRrspShe: 0,
-      employerMatchHe: 0,
-      employerMatchShe: 0,
-      policy,
-      rooms: { ...rooms },
-      buckets,
-    });
-    return { toTfsa: r.toTfsa, toRrsp: r.toRrsp, toNonReg: r.toNonReg };
+  const heExtraAnnual = resolveExtraContributionMonthly(he) * 12;
+  const sheExtraAnnual = resolveExtraContributionMonthly(she) * 12;
+  const roles = resolveEarnerRoles(plan);
+  const { rooms: roomsAfterExtra, ateTfsa: extraAteTfsa } = consumeTfsaForExtra(
+    rooms,
+    heExtraAnnual,
+    sheExtraAnnual,
+    roles.primary
+  );
+
+  const currentYear = new Date().getFullYear();
+  const softHe = computeSoftCapacity(FamilyMember.HE, he, buckets.rrspHe, plan, currentYear);
+  const softShe = computeSoftCapacity(FamilyMember.SHE, she, buckets.rrspShe, plan, currentYear);
+  const preferredRrsp =
+    preferDiscretionaryRrspOwner({
+      softHe: softHe.level,
+      softShe: softShe.level,
+      heSalary: he.salary,
+      sheSalary: she.salary,
+    }) ?? FamilyMember.HE;
+
+  const r = deployAnnualContributions({
+    personalInvestable,
+    payrollRrspHe: 0,
+    payrollRrspShe: 0,
+    employerMatchHe: 0,
+    employerMatchShe: 0,
+    policy: AllocationPolicy.TFSA_FIRST,
+    rooms: { ...roomsAfterExtra },
+    buckets,
+    preferRrsp: preferredRrsp,
+  });
+  const lockedCascade: EsppSplit = {
+    toTfsa: r.toTfsa,
+    toRrsp: r.toRrspHeDiscretionary + r.toRrspSheDiscretionary,
+    toNonReg: r.toNonReg,
+    toTfsaHe: r.toTfsaHe,
+    toTfsaShe: r.toTfsaShe,
+    toRrspHe: r.toRrspHeDiscretionary,
+    toRrspShe: r.toRrspSheDiscretionary,
   };
-
-  const underTfsaFirst = run(AllocationPolicy.TFSA_FIRST);
-  const underRrspFirst = run(AllocationPolicy.RRSP_FIRST);
-  const activePolicy = plan.allocationPolicy ?? AllocationPolicy.TFSA_FIRST;
-  const activeSplit = activePolicy === AllocationPolicy.TFSA_FIRST ? underTfsaFirst : underRrspFirst;
-
-  const suggestedPolicy =
-    scoreSplit(underTfsaFirst) >= scoreSplit(underRrspFirst)
-      ? AllocationPolicy.TFSA_FIRST
-      : AllocationPolicy.RRSP_FIRST;
 
   const fmt = (n: number) =>
     new Intl.NumberFormat('en-CA', { style: 'currency', currency: 'CAD', maximumFractionDigits: 0 }).format(n);
+  const prefName = preferredRrsp === FamilyMember.SHE ? 'She' : 'He';
+  const remainingTfsa = roomsAfterExtra.tfsaHe + roomsAfterExtra.tfsaShe;
 
   let summary: string;
   if (esppCashAnnual <= 0) {
     summary = 'No ESPP cash this year — nothing to redeploy.';
   } else if (depositEsppToRrsp) {
-    const s = suggestedPolicy === AllocationPolicy.TFSA_FIRST ? underTfsaFirst : underRrspFirst;
-    summary = `ESPP→RRSP tax toggle is ON (deduction path). Sale-and-redeploy under ${suggestedPolicy === AllocationPolicy.TFSA_FIRST ? 'TFSA-first' : 'RRSP-first'} would send ${fmt(s.toTfsa)} → TFSA, ${fmt(s.toRrsp)} → RRSP, ${fmt(s.toNonReg)} → non-reg.`;
+    summary = `ESPP→RRSP tax toggle is ON (deduction path). After Extra ate ${fmt(extraAteTfsa)} TFSA, sale-and-redeploy would see ${fmt(remainingTfsa)} TFSA left.`;
   } else {
-    const s = suggestedPolicy === AllocationPolicy.TFSA_FIRST ? underTfsaFirst : underRrspFirst;
-    summary = `Suggest ${suggestedPolicy === AllocationPolicy.TFSA_FIRST ? 'TFSA-first' : 'RRSP-first'} for this year’s ${fmt(esppCashAnnual)} ESPP sale: ${fmt(s.toTfsa)} → TFSA, ${fmt(s.toRrsp)} → discretionary RRSP, ${fmt(s.toNonReg)} → non-reg.`;
+    const extraNote =
+      extraAteTfsa > 0
+        ? `Extra already filled ${fmt(extraAteTfsa)} TFSA (${fmt(remainingTfsa)} left for ESPP). `
+        : '';
+    summary = `${extraNote}Combined ESPP ${fmt(esppCashAnnual)} (${fmt(heEsppCashAnnual)} He / ${fmt(sheEsppCashAnnual)} She): ${fmt(lockedCascade.toTfsaHe)} → He TFSA, ${fmt(lockedCascade.toTfsaShe)} → She TFSA, prefer ${prefName} RRSP (${fmt(lockedCascade.toRrspHe)} He / ${fmt(lockedCascade.toRrspShe)} She), ${fmt(lockedCascade.toNonReg)} → non-reg. Live projection routes each person's ESPP through that person's MV path.`;
   }
 
   return {
@@ -113,11 +154,12 @@ export function explainEsppAllocation(plan: RetirementPlan): EsppAllocationGuide
     employerMatchHe,
     employerMatchShe,
     rooms,
-    underTfsaFirst,
-    underRrspFirst,
-    activePolicy,
-    activeSplit,
-    suggestedPolicy,
+    roomsAfterExtra,
+    extraAteTfsa,
+    heExtraAnnual,
+    sheExtraAnnual,
+    lockedCascade,
+    preferredRrsp,
     depositEsppToRrsp,
     summary,
   };

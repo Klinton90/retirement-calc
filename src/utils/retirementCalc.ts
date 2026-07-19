@@ -1,15 +1,19 @@
 import {
   type RetirementPlan,
   type ProjectionYear,
+  type AccountBuckets,
   FactorType,
   type HouseholdTaxResult,
   type ChildInput,
   type TaxConfig,
   type CcbConfig,
   AllocationPolicy,
+  FamilyMember,
+  ContributionType,
 } from '../types/calculator';
 import { calculateHouseholdTax, calculatePersonTax, DEFAULT_TAX_CONFIG, DEFAULT_CCB_CONFIG } from './taxCalc';
-import { calculatePersonPensionForAge } from './pensionCalc';
+import { calculatePersonPensionForAge, survivorCombinedCppAnnual } from './pensionCalc';
+import { resolveRetirementHorizon } from './retirementHorizon';
 import { calculatePlanTargets } from './targetEngine';
 import {
   totalInvestable,
@@ -21,7 +25,21 @@ import {
 import { rrifMinimumWithdrawal } from './rrifCalc';
 import { calculateHouseholdRetirementTax } from './retirementIncomeTax';
 import { oasClawback, DEFAULT_OAS_CLAWBACK_THRESHOLD, DEFAULT_OAS_CLAWBACK_RATE } from './oasClawback';
-import { deployAnnualContributions, resolveAnnualTfsaLimit } from './contributionPolicy';
+import { deployAnnualContributions, resolveAnnualTfsaLimit, preferDiscretionaryRrspOwner } from './contributionPolicy';
+import {
+  computeSoftCapacity,
+  resolveExtraContributionMonthly,
+} from './excessMoneyGuide';
+import { resolveMvDeployOrders } from './mvDeployOrders';
+import { deployDiscretionaryByMvOrder } from './mvDeployPolicy';
+import { constrainContributionsByFreeCash } from './cashConstrainedContrib';
+import {
+  resolveEarnerRoles,
+  resolveSurvivorDeceased,
+  otherMember,
+} from './earnerRoles';
+import { estimateRrspRefund } from './rrspRefund';
+import './marginalValueGuide'; // ensure MV rank registration for deploy
 
 /**
  * Runs a year-by-year financial projection for the household from the current year
@@ -38,15 +56,19 @@ export function runProjection(
   additionalSavingsMonthly: number = 0
 ): ProjectionYear[] {
   const projection: ProjectionYear[] = [];
-  
+
   const startHeAge = plan.heInput.age;
   const startSheAge = plan.sheInput.age;
-  const lifeExpectancyDelta = plan.lifeExpectancyDelta ?? 30;
-  const targetYears = Math.max(1, (plan.heInput.retirementAge + lifeExpectancyDelta) - startHeAge);
-  
+  const horizon = resolveRetirementHorizon(plan);
+  // Retirement spans exactly `horizon.retirementYears` (ages firstRetire .. lastFunded),
+  // terminal $0 at terminalAge. Must match simulateDecumulation — see retirementHorizon.ts.
+  const targetYears = horizon.projectionYearsFromNow;
+
   let buckets = resolveBuckets(plan);
   let portfolio = totalInvestable(buckets);
   let inflationMultiplier = 1.0;
+  let salaryMultiplier = 1.0;
+  const salaryGrowthRate = plan.salaryGrowthRate ?? 0.01;
 
   const activeChildren: ChildInput[] = plan.children.map(c => ({ ...c }));
 
@@ -54,17 +76,27 @@ export function runProjection(
   const ccbConfigToUse = plan.ccbConfig || DEFAULT_CCB_CONFIG;
   const conversionAgeHe = plan.conversionAgeHe ?? 71;
   const conversionAgeShe = plan.conversionAgeShe ?? 71;
-  const allocationPolicy = plan.allocationPolicy ?? AllocationPolicy.TFSA_FIRST;
+  const allocationPolicy = AllocationPolicy.TFSA_FIRST;
   const inflateTfsa = !!plan.inflateAnnualTfsaLimit;
+  const survivorOn = plan.survivorToggle ?? false;
+  const survivorAt = horizon.survivorYearIndex;
+  const survivorSpendFactor = plan.survivorSpendFactor ?? 0.70;
+  const roles = resolveEarnerRoles(plan);
+  const deceased = resolveSurvivorDeceased(plan);
 
-  let pendingRefund = 0;
+  /** Lagged gross RRSP tax refund by contributor (year N deposits → year N+1 cash). */
+  let pendingHeRefundGross = 0;
+  let pendingSheRefundGross = 0;
 
   let heRrspRoomRemaining = plan.heInput.carryForwardRrspRoom ?? 0;
   let sheRrspRoomRemaining = plan.sheInput.carryForwardRrspRoom ?? 0;
   let heTfsaRoomRemaining = plan.heInput.carryForwardTfsaRoom ?? 0;
   let sheTfsaRoomRemaining = plan.sheInput.carryForwardTfsaRoom ?? 0;
 
-  for (let t = 0; t <= targetYears; t++) {
+  // Phase 3B: MV destination orders once (cached) — not re-ranked each year
+  const { heOrder, sheOrder } = resolveMvDeployOrders(plan, currentYear);
+
+  for (let t = 0; t < targetYears; t++) {
     const year = currentYear + t;
     const ageHe = startHeAge + t;
     const ageShe = startSheAge + t;
@@ -72,6 +104,15 @@ export function runProjection(
     const heRetired = ageHe >= plan.heInput.retirementAge;
     const sheRetired = ageShe >= plan.sheInput.retirementAge;
     const bothRetired = heRetired && sheRetired;
+    const retirementYearIndex = ageHe - plan.heInput.retirementAge;
+    const survivorEvent =
+      survivorOn && retirementYearIndex >= survivorAt;
+    const heAlive = !(
+      survivorEvent && deceased === FamilyMember.HE
+    );
+    const sheAlive = !(
+      survivorEvent && deceased === FamilyMember.SHE
+    );
 
     // New TFSA room is granted Jan 1 — apply at start of each year after year 0.
     // Year 0 carry-forward already includes the current calendar year's limit.
@@ -170,7 +211,7 @@ export function runProjection(
       const workingMonths = 12 - (shePaidMonths + sheUnpaidMonths);
       const workingIncomeFraction = workingMonths / 12;
       
-      const baseSalary = plan.sheInput.salary * inflationMultiplier;
+      const baseSalary = plan.sheInput.salary * salaryMultiplier;
       if (baseSalary > 0) {
         const maxEiEarnings = (taxConfigToUse.eiMaxPremium / taxConfigToUse.eiRate) * inflationMultiplier;
         const annualEiBenefit = Math.min(baseSalary, maxEiEarnings) * 0.55;
@@ -187,7 +228,7 @@ export function runProjection(
       const workingMonths = 12 - hePaidMonths;
       const workingIncomeFraction = workingMonths / 12;
       
-      const baseSalary = plan.heInput.salary * inflationMultiplier;
+      const baseSalary = plan.heInput.salary * salaryMultiplier;
       if (baseSalary > 0) {
         const topupTarget = plan.parentalLeaveConfig?.heTopupTargetRate ?? 0.00;
         const paidIncomeFraction = topupTarget * (hePaidMonths / 12);
@@ -198,8 +239,8 @@ export function runProjection(
     }
 
     // 2. Calculate inflated salaries and expenses
-    const inflatedHeSalary = heRetired ? 0 : plan.heInput.salary * inflationMultiplier * heSalaryFactor;
-    const inflatedSheSalary = sheRetired ? 0 : plan.sheInput.salary * inflationMultiplier * sheSalaryFactor;
+    const inflatedHeSalary = heRetired ? 0 : plan.heInput.salary * salaryMultiplier * heSalaryFactor;
+    const inflatedSheSalary = sheRetired ? 0 : plan.sheInput.salary * salaryMultiplier * sheSalaryFactor;
     const includeExtra = plan.includeExtraIncome ?? true;
     const inflatedHeExtra = heRetired || !includeExtra ? 0 : plan.heInput.extraIncomeMonthly * inflationMultiplier;
     const inflatedSheExtra = sheRetired || !includeExtra ? 0 : plan.sheInput.extraIncomeMonthly * inflationMultiplier;
@@ -217,7 +258,9 @@ export function runProjection(
       const retirementSpendMonthly = useMandatoryOnly 
         ? plan.mandatoryRetirementSpendMonthly 
         : plan.desiredRetirementSpendMonthly;
-      annualExpenses = retirementSpendMonthly * 12 * inflationMultiplier;
+      // After the survivor event a single survivor spends less than the couple.
+      const spendFactor = survivorEvent ? survivorSpendFactor : 1;
+      annualExpenses = retirementSpendMonthly * 12 * inflationMultiplier * spendFactor;
     }
 
     annualExpenses += extraExpenses;
@@ -282,7 +325,9 @@ export function runProjection(
         yearCcbConfig,
         plan.depositEsppToRrsp ?? false,
         spousalRrspMonthly,
-        heRrspRoomRemaining
+        heRrspRoomRemaining,
+        sheRrspRoomRemaining,
+        roles.primary
       );
 
       // Compute salary-only net independently so the column is stable when toggling extra income.
@@ -293,7 +338,14 @@ export function runProjection(
           { ...currentHeInput, extraIncomeMonthly: 0 },
           yearTaxConfig,
           plan.depositEsppToRrsp ?? false,
-          (currentHeInput.otherSavingsRrspMonthly || 0) + (taxResult.spousalContributionMonthly || 0)
+          roles.primary === FamilyMember.HE
+            ? (currentHeInput.otherSavingsRrspMonthly || 0) +
+                (taxResult.spousalContributionMonthly || 0)
+            : Math.max(
+                0,
+                (currentHeInput.otherSavingsRrspMonthly || 0) -
+                  (taxResult.spousalContributionMonthly || 0)
+              )
         );
         heNetSalaryOnly = heBaseline.takeHomePay - (taxResult.he.taxSavings ?? 0);
         heExtraIncomeNet = (taxResult.he.takeHomePay - (taxResult.he.taxSavings ?? 0)) - heNetSalaryOnly;
@@ -303,7 +355,14 @@ export function runProjection(
           { ...currentSheInput, extraIncomeMonthly: 0 },
           yearTaxConfig,
           plan.depositEsppToRrsp ?? false,
-          Math.max(0, (currentSheInput.otherSavingsRrspMonthly || 0) - (taxResult.spousalContributionMonthly || 0))
+          roles.primary === FamilyMember.SHE
+            ? (currentSheInput.otherSavingsRrspMonthly || 0) +
+                (taxResult.spousalContributionMonthly || 0)
+            : Math.max(
+                0,
+                (currentSheInput.otherSavingsRrspMonthly || 0) -
+                  (taxResult.spousalContributionMonthly || 0)
+              )
         );
         sheNetSalaryOnly = sheBaseline.takeHomePay - (taxResult.she.taxSavings ?? 0);
         sheExtraIncomeNet = (taxResult.she.takeHomePay - (taxResult.she.taxSavings ?? 0)) - sheNetSalaryOnly;
@@ -322,20 +381,39 @@ export function runProjection(
     let sheCppAnnual = 0;
     if (heRetired || sheRetired) {
       const yearPensionCfg = inflatePensionConfig(inflationMultiplier);
-      if (heRetired) {
-        const hp = calculatePersonPensionForAge(plan.heInput, currentYear, ageHe, yearPensionCfg, yearTaxConfig);
-        hePenAnnual = hp.totalPensionAnnual;
-        heOasAnnual = hp.oasAnnual;
-        heCppAnnual = hp.cppAnnual;
-        pensionIncome += hePenAnnual;
+      const heP = heRetired
+        ? calculatePersonPensionForAge(plan.heInput, currentYear, ageHe, yearPensionCfg, yearTaxConfig)
+        : undefined;
+      const sheP = sheRetired
+        ? calculatePersonPensionForAge(plan.sheInput, currentYear, ageShe, yearPensionCfg, yearTaxConfig)
+        : undefined;
+      if (heAlive && sheAlive) {
+        heOasAnnual = heP?.oasAnnual ?? 0;
+        heCppAnnual = heP?.cppAnnual ?? 0;
+        sheOasAnnual = sheP?.oasAnnual ?? 0;
+        sheCppAnnual = sheP?.cppAnnual ?? 0;
+      } else if (sheAlive) {
+        heOasAnnual = 0;
+        heCppAnnual = 0;
+        sheOasAnnual = sheP?.oasAnnual ?? 0;
+        sheCppAnnual = survivorCombinedCppAnnual(
+          sheP?.cppAnnual ?? 0,
+          heP?.cppAnnual ?? 0,
+          yearPensionCfg.maxCppMonthly * 12
+        );
+      } else {
+        sheOasAnnual = 0;
+        sheCppAnnual = 0;
+        heOasAnnual = heP?.oasAnnual ?? 0;
+        heCppAnnual = survivorCombinedCppAnnual(
+          heP?.cppAnnual ?? 0,
+          sheP?.cppAnnual ?? 0,
+          yearPensionCfg.maxCppMonthly * 12
+        );
       }
-      if (sheRetired) {
-        const sp = calculatePersonPensionForAge(plan.sheInput, currentYear, ageShe, yearPensionCfg, yearTaxConfig);
-        shePenAnnual = sp.totalPensionAnnual;
-        sheOasAnnual = sp.oasAnnual;
-        sheCppAnnual = sp.cppAnnual;
-        pensionIncome += shePenAnnual;
-      }
+      hePenAnnual = heOasAnnual + heCppAnnual;
+      shePenAnnual = sheOasAnnual + sheCppAnnual;
+      pensionIncome = hePenAnnual + shePenAnnual;
     }
 
     // 4. Decumulation & Progressive Tax Solver in Retirement
@@ -360,15 +438,31 @@ export function runProjection(
 
     const additionalSavingsAnnual = additionalSavingsMonthly * 12 * inflationMultiplier;
     const refundSaveRate = plan.esppRefundSaveRate ?? 0.50;
-    const reinvestedRefund = bothRetired ? 0 : (refundSaveRate * pendingRefund);
-    const totalSavingsThisYear = bothRetired ? 0 : (taxResult.totalHouseholdActualSavings + additionalSavingsAnnual + reinvestedRefund);
+    const pendingRefundGross = pendingHeRefundGross + pendingSheRefundGross;
+    // Tax-module "election" savings — overwritten below by cash-constrained deployed amount.
+    let totalSavingsThisYear = bothRetired
+      ? 0
+      : taxResult.totalHouseholdActualSavings + additionalSavingsAnnual;
+    let shortfallRaided = 0;
+    let unallocatedCashUncappedOut = 0;
+    let intendedPersonalCashOut = 0;
 
+    // Display / cash lag: taxCalc still embeds same-year RRSP deduction benefit in takeHome
+    // when otherSavings/spousal/ESPP→payroll are wired — strip it here and credit last year's
+    // post-deploy gross refund instead (single live-path refund mechanism).
     const currentYearTaxSavings = (taxResult.he.taxSavings ?? 0) + (taxResult.she.taxSavings ?? 0);
 
     if (!bothRetired) {
       pensionNet = pensionIncome * 0.85;
-      netIncome = taxResult.he.takeHomePay + taxResult.she.takeHomePay + taxResult.ccbBenefit + pensionNet - currentYearTaxSavings + pendingRefund;
-      unallocatedCash = netIncome - totalSavingsThisYear - annualExpenses;
+      netIncome =
+        taxResult.he.takeHomePay +
+        taxResult.she.takeHomePay +
+        taxResult.ccbBenefit +
+        pensionNet -
+        currentYearTaxSavings +
+        pendingRefundGross;
+      // Placeholder — recomputed after cash-constrained deploy (personal cash used, not tax elections).
+      unallocatedCash = netIncome - annualExpenses;
     } else {
       // Bucket-aware retirement: RRIF mins → TFSA bridge → taxable RRSP → non-reg; RRIF-only split
       portfolioStartBeforeDraw = totalInvestable(buckets);
@@ -387,6 +481,10 @@ export function runProjection(
       let bestNonReg = 0;
       let bestTrial = cloneBuckets(buckets);
       let bestNet = 0;
+      // When the portfolio cannot fully fund spend, shortfall stays > 0 for every
+      // trial. We must still keep the lowest-shortfall (max-drain) attempt —
+      // otherwise best* stays at RRIF mins only and leftover capital grows.
+      let bestShortfall = Number.POSITIVE_INFINITY;
 
       for (let iter = 0; iter < 18; iter++) {
         const extra = (low + high) / 2;
@@ -398,16 +496,23 @@ export function runProjection(
 
         const roughNet = heCppAnnual + sheCppAnnual + heOasAnnual + sheOasAnnual + dHe + dShe;
         let bridgeNeed = Math.max(0, annualExpenses - roughNet);
-        // TFSA bridge policy: He first, then She (not a fixed %)
         let tfsaHeTaken = 0;
         let tfsaSheTaken = 0;
-        const th = Math.min(t.tfsaHe, bridgeNeed);
-        t.tfsaHe -= th;
-        tfsaHeTaken += th;
-        bridgeNeed -= th;
-        const ts = Math.min(t.tfsaShe, bridgeNeed);
-        t.tfsaShe -= ts;
-        tfsaSheTaken += ts;
+        const first =
+          t.tfsaHe === t.tfsaShe
+            ? roles.secondary
+            : t.tfsaHe > t.tfsaShe
+              ? FamilyMember.HE
+              : FamilyMember.SHE;
+        for (const who of [first, otherMember(first)]) {
+          const key =
+            who === FamilyMember.HE ? 'tfsaHe' : 'tfsaShe';
+          const take = Math.min(t[key], bridgeNeed);
+          t[key] -= take;
+          if (who === FamilyMember.HE) tfsaHeTaken += take;
+          else tfsaSheTaken += take;
+          bridgeNeed -= take;
+        }
 
         let rem = extra;
         // Extra RRSP policy: repeatedly take from the larger remaining RRSP (not fixed %)
@@ -442,7 +547,7 @@ export function runProjection(
           DEFAULT_OAS_CLAWBACK_THRESHOLD * inflationMultiplier,
           DEFAULT_OAS_CLAWBACK_RATE
         );
-        const canSplit = ageHe >= 65 && ageShe >= 65;
+        const canSplit = ageHe >= 65 && ageShe >= 65 && heAlive && sheAlive;
         const nonRegTaxable = nonRegTaken * 0.5;
         const taxRes = calculateHouseholdRetirementTax(
           heCppAnnual + heClaw.oasAfter + dHe + nonRegTaxable / 2,
@@ -465,17 +570,18 @@ export function runProjection(
           taxRes.totalTax;
         const shortfall = Math.max(0, annualExpenses - netCash);
 
-        if (shortfall > 0.5) {
-          low = extra;
-        } else {
+        if (shortfall <= 0.5) {
+          // Funded: keep shrinking extra (high = mid) and always record the trial
+          // so we converge to the minimum withdrawal that still covers spend.
           high = extra;
+          bestShortfall = shortfall;
           bestTax = taxRes.totalTax;
           bestDrawHe = dHe;
           bestDrawShe = dShe;
           bestTfsaHe = tfsaHeTaken;
           bestTfsaShe = tfsaSheTaken;
           bestNonReg = nonRegTaken;
-          bestTrial = t;
+          bestTrial = cloneBuckets(t);
           bestNet = netCash;
           if (netCash > annualExpenses + 1) {
             Object.assign(
@@ -487,6 +593,21 @@ export function runProjection(
                 sheTfsaRoomRemaining
               )
             );
+          }
+        } else {
+          // Underfunded: need more draw. Still keep the lowest-shortfall trial so
+          // we max-drain instead of leaving RRIF-mins-only leftovers that grow.
+          low = extra;
+          if (shortfall < bestShortfall - 1e-6) {
+            bestShortfall = shortfall;
+            bestTax = taxRes.totalTax;
+            bestDrawHe = dHe;
+            bestDrawShe = dShe;
+            bestTfsaHe = tfsaHeTaken;
+            bestTfsaShe = tfsaSheTaken;
+            bestNonReg = nonRegTaken;
+            bestTrial = cloneBuckets(t);
+            bestNet = netCash;
           }
         }
       }
@@ -519,9 +640,8 @@ export function runProjection(
     let investmentGain = 0;
 
     if (!bothRetired) {
-      const netContribution = totalSavingsThisYear + Math.min(0, unallocatedCash);
-
-      // Returns on opening balance only — this year's contributions do not earn a full-year return.
+      // Cash-aware deploy: leave-reduced salary for elections; cap personal contribs by
+      // free cash after lifestyle/child; then raid portfolio only if still short.
       buckets = growBuckets(buckets, plan.investmentReturnRate);
       if (portfolioMultiplier !== 1) {
         buckets = {
@@ -535,44 +655,218 @@ export function runProjection(
       }
       investmentGain = totalInvestable(buckets) - portfolioStart;
 
-      if (netContribution >= 0) {
-        // Payroll RRSP = employee deduction (+ ESPP→RRSP if that toggle is on). Employer match is separate.
-        const hePayroll = taxResult.he.totalRrspDeduction ?? 0;
-        const shePayroll = taxResult.she.totalRrspDeduction ?? 0;
-        const heMatch = inflatedHeSalary * ((plan.heInput.rrspEmployerRate || 0) / 100);
-        const sheMatch = inflatedSheSalary * ((plan.sheInput.rrspEmployerRate || 0) / 100);
-        // Discretionary = ESPP sale cash + other TFSA/manual savings etc. (not payroll/match)
-        const discretionary = Math.max(
-          0,
-          netContribution - hePayroll - shePayroll - heMatch - sheMatch
-        );
-        const rooms = {
+      // Leave-reduced salary (inflatedHe/SheSalary) — parental leave lowers payroll savings.
+      const heSalaryForSave = inflatedHeSalary;
+      const sheSalaryForSave = inflatedSheSalary;
+      const heEmpElect = heRetired
+        ? 0
+        : plan.heInput.rrspEmployeeType === ContributionType.PERCENTAGE
+          ? heSalaryForSave * (plan.heInput.rrspEmployeeValue / 100)
+          : plan.heInput.rrspEmployeeValue * 12 * salaryMultiplier;
+      const sheEmpElect = sheRetired
+        ? 0
+        : plan.sheInput.rrspEmployeeType === ContributionType.PERCENTAGE
+          ? sheSalaryForSave * (plan.sheInput.rrspEmployeeValue / 100)
+          : plan.sheInput.rrspEmployeeValue * 12 * salaryMultiplier;
+      const heMatchFull = heRetired
+        ? 0
+        : heSalaryForSave * ((plan.heInput.rrspEmployerRate || 0) / 100);
+      const sheMatchFull = sheRetired
+        ? 0
+        : sheSalaryForSave * ((plan.sheInput.rrspEmployerRate || 0) / 100);
+      const heEsppEmployeeElect = heRetired
+        ? 0
+        : heSalaryForSave * ((plan.heInput.esppEmployeeRate || 0) / 100);
+      const heEsppEmployerElect = heRetired
+        ? 0
+        : heSalaryForSave * ((plan.heInput.esppEmployerRate || 0) / 100);
+      const sheEsppEmployeeElect = sheRetired
+        ? 0
+        : sheSalaryForSave *
+          ((plan.sheInput.esppEmployeeRate || 0) / 100);
+      const sheEsppEmployerElect = sheRetired
+        ? 0
+        : sheSalaryForSave *
+          ((plan.sheInput.esppEmployerRate || 0) / 100);
+      const depositEspp = !!plan.depositEsppToRrsp;
+      // Lagged RRSP refund reinvestment (Extra + ESPP that landed in RRSP last year).
+      const heRefundRedepositElect = !heRetired
+        ? pendingHeRefundGross * refundSaveRate
+        : 0;
+      const sheRefundRedepositElect = !sheRetired
+        ? pendingSheRefundGross * refundSaveRate
+        : 0;
+      const heExtraElect = heRetired
+        ? 0
+        : resolveExtraContributionMonthly(plan.heInput) * 12 * inflationMultiplier;
+      const sheExtraElect = sheRetired
+        ? 0
+        : resolveExtraContributionMonthly(plan.sheInput) * 12 * inflationMultiplier;
+      const solverExtraElect = heRetired && sheRetired ? 0 : additionalSavingsAnnual;
+
+      // Free cash after lifestyle (takeHome does NOT already deduct RRSP/ESPP employee).
+      const freeCash = netIncome - annualExpenses;
+      // Uncapped strain: cash left if you funded the FULL intended savings plan.
+      // Negative in years the plan outstrips cash (before we cut savings / raid).
+      const intendedPersonalCash =
+        heEmpElect +
+        sheEmpElect +
+        heEsppEmployeeElect +
+        sheEsppEmployeeElect +
+        heExtraElect +
+        sheExtraElect +
+        solverExtraElect +
+        heRefundRedepositElect +
+        sheRefundRedepositElect;
+      const unallocatedCashUncapped = freeCash - intendedPersonalCash;
+      const capped = constrainContributionsByFreeCash(freeCash, {
+        heEmp: heEmpElect,
+        sheEmp: sheEmpElect,
+        heEsppEmployee: heEsppEmployeeElect,
+        sheEsppEmployee: sheEsppEmployeeElect,
+        heEsppEmployer: heEsppEmployerElect,
+        sheEsppEmployer: sheEsppEmployerElect,
+        heMatchFull,
+        sheMatchFull,
+        heExtra: heExtraElect,
+        sheExtra: sheExtraElect,
+        solverExtra: solverExtraElect,
+        heRefundRedeposit: heRefundRedepositElect,
+        sheRefundRedeposit: sheRefundRedepositElect,
+      });
+
+      const heEsppCash =
+        capped.heEsppEmployee + capped.heEsppEmployer;
+      const sheEsppCash =
+        capped.sheEsppEmployee + capped.sheEsppEmployer;
+      const heEsppToPayroll = depositEspp ? heEsppCash : 0;
+      const sheEsppToPayroll = depositEspp ? sheEsppCash : 0;
+      const heEsppSale = depositEspp ? 0 : heEsppCash;
+      const sheEsppSale = depositEspp ? 0 : sheEsppCash;
+
+      // Credit this year's earned RRSP room before discretionary (matches accumulate).
+      if (!heRetired) {
+        heRrspRoomRemaining += Math.min(33720 * inflationMultiplier, heSalaryForSave * 0.18);
+      }
+      if (!sheRetired) {
+        sheRrspRoomRemaining += Math.min(33720 * inflationMultiplier, sheSalaryForSave * 0.18);
+      }
+
+      const rooms = {
+        tfsaHe: heTfsaRoomRemaining,
+        tfsaShe: sheTfsaRoomRemaining,
+        rrspHe: heRrspRoomRemaining,
+        rrspShe: sheRrspRoomRemaining,
+      };
+      const softHe = computeSoftCapacity(
+        FamilyMember.HE,
+        plan.heInput,
+        buckets.rrspHe,
+        plan,
+        year
+      );
+      const softShe = computeSoftCapacity(
+        FamilyMember.SHE,
+        plan.sheInput,
+        buckets.rrspShe,
+        plan,
+        year
+      );
+      const preferRrsp =
+        preferDiscretionaryRrspOwner({
+          softHe: softHe.level,
+          softShe: softShe.level,
+          heSalary: heSalaryForSave,
+          sheSalary: sheSalaryForSave,
+        }) ?? FamilyMember.HE;
+      const payrollDeploy = deployAnnualContributions({
+        personalInvestable: 0,
+        payrollRrspHe: capped.heEmp + heEsppToPayroll,
+        payrollRrspShe: capped.sheEmp + sheEsppToPayroll,
+        employerMatchHe: capped.heMatch,
+        employerMatchShe: capped.sheMatch,
+        policy: allocationPolicy,
+        rooms,
+        buckets,
+        preferRrsp,
+      });
+      buckets = payrollDeploy.buckets;
+      heTfsaRoomRemaining = payrollDeploy.rooms.tfsaHe;
+      sheTfsaRoomRemaining = payrollDeploy.rooms.tfsaShe;
+      heRrspRoomRemaining = payrollDeploy.rooms.rrspHe;
+      sheRrspRoomRemaining = payrollDeploy.rooms.rrspShe;
+
+      const disc = deployDiscretionaryByMvOrder({
+        heExtraAnnual:
+          capped.heExtra +
+          (roles.primary === FamilyMember.HE
+            ? capped.solverExtra
+            : 0),
+        sheExtraAnnual:
+          capped.sheExtra +
+          (roles.primary === FamilyMember.SHE
+            ? capped.solverExtra
+            : 0),
+        heEsppSaleAnnual: heEsppSale,
+        sheEsppSaleAnnual: sheEsppSale,
+        heRefundRedepositAnnual: capped.heRefundRedeposit,
+        sheRefundRedepositAnnual: capped.sheRefundRedeposit,
+        rooms: {
           tfsaHe: heTfsaRoomRemaining,
           tfsaShe: sheTfsaRoomRemaining,
           rrspHe: heRrspRoomRemaining,
           rrspShe: sheRrspRoomRemaining,
-        };
-        const deployed = deployAnnualContributions({
-          personalInvestable: discretionary,
-          payrollRrspHe: hePayroll,
-          payrollRrspShe: shePayroll,
-          employerMatchHe: heMatch,
-          employerMatchShe: sheMatch,
-          policy: allocationPolicy,
-          rooms,
-          buckets,
-        });
-        buckets = deployed.buckets;
-        heTfsaRoomRemaining = deployed.rooms.tfsaHe;
-        sheTfsaRoomRemaining = deployed.rooms.tfsaShe;
-        heRrspRoomRemaining = deployed.rooms.rrspHe;
-        sheRrspRoomRemaining = deployed.rooms.rrspShe;
-        contribToTfsa = deployed.toTfsa;
-        contribToRrsp = deployed.toRrsp;
-        contribToNonReg = deployed.toNonReg;
-      } else {
-        // Deficit: draw from non-reg → TFSA → RRSP (after growth)
-        let need = -netContribution;
+        },
+        buckets,
+        heOrder,
+        sheOrder,
+        spousalContributor: roles.primary,
+      });
+      buckets = disc.buckets;
+      heTfsaRoomRemaining = disc.rooms.tfsaHe;
+      sheTfsaRoomRemaining = disc.rooms.tfsaShe;
+      heRrspRoomRemaining = disc.rooms.rrspHe;
+      sheRrspRoomRemaining = disc.rooms.rrspShe;
+      contribToTfsa = payrollDeploy.toTfsa + disc.toTfsa;
+      contribToRrsp = payrollDeploy.toRrsp + disc.toRrsp;
+      contribToNonReg = payrollDeploy.toNonReg + disc.toNonReg;
+
+      // Post-deploy RRSP landings → gross tax refund (lagged into next year's pool).
+      // Prefer tax-engine delta when present (matches takeHome − taxSavings lag); keep
+      // contributor split from actual deposits. When tax misses sale→RRSP landings
+      // (checkbox off), fall back to the deposit × marginal estimate.
+      const refundEst = estimateRrspRefund({
+        deposits: {
+          heOwn: disc.heSplit.toRrspOwn,
+          sheOwn: disc.sheSplit.toRrspOwn,
+          spousal: disc.toSpousal,
+          hePayrollEspp: heEsppToPayroll,
+          shePayrollEspp: sheEsppToPayroll,
+        },
+        heSalary: heSalaryForSave,
+        sheSalary: sheSalaryForSave,
+        spousalContributor: roles.primary,
+        taxConfig: yearTaxConfig,
+        reinvestRate: refundSaveRate,
+      });
+      let heG = refundEst.byContributorGross.he;
+      let sheG = refundEst.byContributorGross.she;
+      const estSum = heG + sheG;
+      if (currentYearTaxSavings > 0 && estSum > 0) {
+        const scale = currentYearTaxSavings / estSum;
+        heG *= scale;
+        sheG *= scale;
+      } else if (currentYearTaxSavings > 0 && estSum <= 0) {
+        if (roles.primary === FamilyMember.HE) heG = currentYearTaxSavings;
+        else sheG = currentYearTaxSavings;
+      }
+      pendingHeRefundGross = heG;
+      pendingSheRefundGross = sheG;
+
+      // Raid portfolio only for residual shortfall after voluntary savings cut to zero.
+      shortfallRaided = capped.raid;
+      if (shortfallRaided > 0.5) {
+        let need = shortfallRaided;
         const take = (field: 'nonReg' | 'tfsaHe' | 'tfsaShe' | 'rrspHe' | 'rrspShe') => {
           const t = Math.min(buckets[field], need);
           buckets[field] -= t;
@@ -583,7 +877,15 @@ export function runProjection(
         take('tfsaShe');
         take('rrspHe');
         take('rrspShe');
+        shortfallRaided = shortfallRaided - need; // actual amount taken
       }
+
+      // Reconcile cash-flow savings with what the portfolio actually received.
+      totalSavingsThisYear = capped.personalCashUsed + capped.employerCashAdded;
+      unallocatedCash = freeCash - capped.personalCashUsed;
+      unallocatedCashUncappedOut = unallocatedCashUncapped;
+      intendedPersonalCashOut = intendedPersonalCash;
+
       portfolioEnd = totalInvestable(buckets);
       portfolio = Math.max(0, portfolioEnd);
     } else {
@@ -603,13 +905,8 @@ export function runProjection(
       investmentGain = portfolioEnd - (portfolioStart - portfolioDrawTotal);
       portfolio = portfolioEnd;
     }
-    // New RRSP room from this year's earned income (available going into next year).
-    // TFSA annual limit is applied at the *start* of the following year (see loop head).
-    const maxRrspLimit = 33720 * inflationMultiplier;
-    const newHeRrspRoom = heRetired ? 0 : Math.min(maxRrspLimit, inflatedHeSalary * 0.18);
-    const newSheRrspRoom = sheRetired ? 0 : Math.min(maxRrspLimit, inflatedSheSalary * 0.18);
-    heRrspRoomRemaining += newHeRrspRoom;
-    sheRrspRoomRemaining += newSheRrspRoom;
+    // RRSP room for this year's earned income is credited *before* discretionary deploy
+    // (same timing as accumulateToRetirement). TFSA annual limit still applies at next year start.
 
     projection.push({
       year,
@@ -653,7 +950,7 @@ export function runProjection(
       sheTakeHomePay: sheNetSalaryOnly,
       heExtraIncomeNet,
       sheExtraIncomeNet,
-      taxSavingsPending: pendingRefund,
+      taxSavingsPending: pendingRefundGross,
       savingsTargetAmount: bothRetired ? 0 : taxResult.savingsTargetAmount,
       contribToTfsa,
       contribToRrsp,
@@ -662,10 +959,25 @@ export function runProjection(
       sheRrspRoomRemaining,
       heTfsaRoomRemaining,
       sheTfsaRoomRemaining,
+      bucketBalances: {
+        tfsaHe: buckets.tfsaHe,
+        tfsaShe: buckets.tfsaShe,
+        rrspHe: buckets.rrspHe,
+        rrspShe: buckets.rrspShe,
+        nonReg: buckets.nonReg,
+      },
+      shortfallRaided: shortfallRaided > 0 ? shortfallRaided : undefined,
+      unallocatedCashUncapped: bothRetired ? undefined : unallocatedCashUncappedOut,
+      intendedPersonalCash: bothRetired ? undefined : intendedPersonalCashOut,
     });
 
     inflationMultiplier *= (1 + currentInflationRate);
-    pendingRefund = currentYearTaxSavings;
+    salaryMultiplier *= (1 + salaryGrowthRate);
+    if (bothRetired) {
+      pendingHeRefundGross = 0;
+      pendingSheRefundGross = 0;
+    }
+    // else: pending*RefundGross already set post-deploy above
   }
 
   return projection;
@@ -803,12 +1115,37 @@ export interface MinSavingsRequiredResult {
   allocationPolicy?: import('../types/calculator').AllocationPolicy;
 }
 
+/** Opening investable buckets at retirement from a full cash-aware projection. */
+export function bucketsAtRetirementFromProjection(
+  plan: RetirementPlan,
+  personalMonthlyToday: number,
+  currentYear: number,
+  useMandatoryOnly: boolean = false
+): AccountBuckets {
+  const projection = runProjection(plan, currentYear, useMandatoryOnly, personalMonthlyToday);
+  const retireIdx = projection.findIndex(r => r.isRetired);
+  if (retireIdx <= 0) return resolveBuckets(plan);
+  const bal = projection[retireIdx - 1]?.bucketBalances;
+  if (!bal) return resolveBuckets(plan);
+  return {
+    tfsaHe: bal.tfsaHe,
+    tfsaShe: bal.tfsaShe,
+    rrspHe: bal.rrspHe,
+    rrspShe: bal.rrspShe,
+    nonReg: bal.nonReg,
+    cashExcluded: 0,
+  };
+}
+
 export function calculateMinSavingsRequired(
   plan: RetirementPlan,
   currentYear: number,
   useMandatoryOnly: boolean
 ): MinSavingsRequiredResult {
-  const targets = calculatePlanTargets(plan, currentYear, useMandatoryOnly);
+  const targets = calculatePlanTargets(plan, currentYear, useMandatoryOnly, {
+    accumulate: (p, monthly, year) =>
+      bucketsAtRetirementFromProjection(p, monthly, year, useMandatoryOnly),
+  });
   const projection = runProjection(
     {
       ...plan,
@@ -822,7 +1159,7 @@ export function calculateMinSavingsRequired(
 
   return {
     monthlySavingsNeeded: targets.monthlyPersonalSavingsNeeded,
-    nestEgg: targets.nestEggAtRetirement,
+    nestEgg: targets.projectedNestEggAtRetirement,
     portfolioCurve: targets.portfolioCurve,
     annualSpendCurve: targets.annualSpendCurve,
     shortfallFromCurrent: targets.shortfallFromCurrentPath,
@@ -837,6 +1174,15 @@ export function calculateMinSavingsRequired(
       allocationPolicy: targets.allocationPolicy,
       surplusSpend: targets.surplusSpend,
       currentPathPortfolioCurve: targets.currentPathPortfolioCurve,
+      currentPathBucketCurves: targets.currentPathBucketCurves,
+      requiredNestEggToZero: targets.requiredNestEggToZero,
+      requiredNestEggToZeroCurve: targets.requiredNestEggToZeroCurve,
+      nestEggToZeroBand: targets.nestEggToZeroBand,
+      bucketCurves: targets.bucketCurves,
+      bucketsAtRetirement: targets.bucketsAtRetirement,
+      projectedNestEggAtRetirement: targets.projectedNestEggAtRetirement,
+      projectedBucketsAtRetirement: targets.projectedBucketsAtRetirement,
+      solvedNestEggAtRetirement: targets.nestEggAtRetirement,
     } as object),
   };
 }

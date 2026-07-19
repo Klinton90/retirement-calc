@@ -19,7 +19,7 @@ Rationale and comparison: see [ADR 0001](decisions/0001-documentation-system.md)
 | Settled decisions | [`docs/decisions/`](decisions/) | Read when revisiting a tradeoff |
 | Active change (this sprint) | [`docs/specs/active/`](specs/active/) | Read/write for the current feature |
 | Done changes | [`docs/specs/archive/`](specs/archive/) | Audit only |
-| How to run / build | [`docs/how-to/`](how-to/) | On demand |
+| How to run / build / deploy | [`docs/how-to/`](how-to/) (incl. [GitHub Pages](how-to/deploy-github-pages.md)) | On demand |
 
 **Code and tests beat prose** for “what the implementation does today.” Docs beat code for **intent not yet encoded**, **cross-cutting policy**, and **why we rejected alternatives**.
 
